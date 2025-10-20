@@ -1,122 +1,51 @@
 # Vouch
 
-**Enterprise-grade device attestation for Tailscale networks - without the enterprise price tag**
+Device posture attestation for Tailscale networks. Continuously monitors device security state and enforces compliance via ACLs.
 
-Vouch continuously monitors device security posture (OS patches, firewall, encryption, Tailscale client health) and automatically enforces compliance via Tailscale ACLs. Build your own BeyondCorp-style zero-trust network.
+## What it does
 
-## Why Vouch?
+Agents run on each device and report security posture to a central server:
+- OS update status (last update time, auto-update enabled, pending updates)
+- Disk encryption (LUKS, FileVault, BitLocker)
+- Firewall status (ufw, iptables, nftables, Windows Defender)
+- Tailscale client health (version, auto-update, online status)
+- Secure Boot and TPM presence
+- System health (time sync, tailscaled running)
 
-- 🔒 **Comprehensive security checks** - OS updates, firewall, disk encryption, Secure Boot, TPM, Tailscale client health
-- 🎯 **Policy-driven** - Define custom compliance rules in YAML
-- ⚡ **Lightweight** - <10MB agents, minimal CPU/memory overhead
-- 🔐 **Cryptographically signed** - Ed25519-signed heartbeats with replay protection
-- 🔌 **Tailscale-native** - Automatic ACL enforcement via API
-- 🏠 **Self-hosted** - Full control, no SaaS required
-- 🚀 **Auto-updating** - Agents can self-update with signature verification
+Server evaluates posture against policies and optionally updates Tailscale ACL tags to enforce access control.
 
-## Features
+## Installation
 
-### Device Posture Checks
-
-✅ **Tailscale Client**
-- Version tracking
-- Auto-update status
-- Release track (stable/beta)
-- State encryption enabled
-
-✅ **Operating System**
-- Update recency (last patch time)
-- Outstanding updates count
-- Pending reboot detection
-- Auto-update service status (unattended-upgrades, Windows Update)
-
-✅ **Security**
-- Disk encryption per volume (LUKS, BitLocker, FileVault)
-- Secure Boot status
-- TPM presence and version
-- Firewall enabled and configured (ufw, iptables, nftables, Windows Defender)
-
-✅ **Hardening** (optional)
-- SELinux/AppArmor enforcing
-- SSH password authentication disabled
-- Kernel lockdown mode
-- Anti-malware status (Windows Defender)
-
-✅ **System Health**
-- Tailscaled running and online
-- Time synchronization (NTP drift detection)
-- Network connectivity
-- Service health
-
-### Security Features
-
-- **Ed25519 signed requests** - All agent reports cryptographically signed
-- **Replay protection** - 5-minute request validity window with nonce
-- **Identity binding** - Agent identity tied to Tailscale node ID
-- **Secure credential storage** - Private keys stored with 0600 permissions
-- **One-time enrollment tokens** - Prevent unauthorized agent registration
-
-### Management
-
-- **CLI tool** - View compliance status, manage devices
-- **REST API** - Integration with existing tools
-- **Tailscale ACL automation** - Automatic tag management
-- **Flexible policies** - YAML-based rules, hot-reload capable
-- **Remote configuration** - Optional policy overlay from server
-
-## Quick Start
-
-### Install Server
+### Server
 
 ```bash
-# Download latest release
+# Binary
 wget https://github.com/haasonsaas/vouch/releases/latest/download/vouch-server-linux-amd64
 chmod +x vouch-server-linux-amd64
-sudo mv vouch-server-linux-amd64 /usr/local/bin/vouch-server
+./vouch-server-linux-amd64 --policy policies.yaml --listen :8080
 
-# Or use Docker
-docker pull ghcr.io/haasonsaas/vouch-server:latest
+# Docker
 docker run -d -p 8080:8080 \
   -v ./policies.yaml:/etc/vouch/policies.yaml \
-  -v vouch-data:/var/lib/vouch \
   ghcr.io/haasonsaas/vouch-server:latest
 ```
 
-### Install Agent
+### Agent
 
 ```bash
-# One-line install
+# Install
 curl -fsSL https://raw.githubusercontent.com/haasonsaas/vouch/main/install.sh | sh
 
-# Or manually
-wget https://github.com/haasonsaas/vouch/releases/latest/download/vouch-agent-linux-amd64
-chmod +x vouch-agent-linux-amd64
-sudo mv vouch-agent-linux-amd64 /usr/local/bin/vouch-agent
+# Enroll (one-time)
+vouch-agent --enroll <token> --server http://vouch-server:8080
 
-# Enroll
-sudo vouch-agent --enroll TOKEN_FROM_SERVER --server https://vouch.your-tailnet.ts.net
-
-# Start service
-sudo systemctl enable --now vouch-agent
-```
-
-### Check Status
-
-```bash
-# Download CLI
-wget https://github.com/haasonsaas/vouch/releases/latest/download/vouch-linux-amd64
-chmod +x vouch-linux-amd64
-sudo mv vouch-linux-amd64 /usr/local/bin/vouch
-
-# View compliance
-vouch status
-vouch devices
-vouch device dev-desktop
+# Start
+systemctl enable --now vouch-agent
 ```
 
 ## Configuration
 
-### Example Policy
+### Policy Example
 
 ```yaml
 # policies.yaml
@@ -132,195 +61,120 @@ rules:
   - name: require-encryption
     check: disk_encrypted == true
     action: deny
-    
-  - name: require-secure-boot
-    check: secure_boot_enabled == true
-    action: warn
-    
-  - name: require-tailscale-auto-update
-    check: tailscale_auto_update == true
-    action: warn
 ```
 
-### Agent Configuration
+### Agent Config
 
 ```yaml
 # /etc/vouch/agent.yaml
 server:
-  url: https://vouch.your-tailnet.ts.net
+  url: http://vouch-server:8080
   request_timeout_s: 10
 
-auth:
-  key_path: /var/lib/vouch/agent_key
-  allow_key_rotation: true
-
 reporting:
-  interval_s: 300  # 5 minutes
+  interval_s: 300
   jitter_s: 30
-  include_listening_services: false
 
 checks:
   tailscale:
     enable: true
-    localapi_socket: /var/run/tailscale/tailscaled.sock
-  
   firewall:
     enable: true
-    linux_prefer: "auto"  # ufw, iptables, nftables, auto
-  
   updates:
     enable: true
-    max_days_since_update: 30
-  
   disk_encryption:
     enable: true
-    require_root_volume: true
-  
   secure_boot_tpm:
     enable: true
-  
-  antimalware:
-    enable: true
-    min_sig_recency_days: 7
-
-health:
-  time_drift_max_s: 120
 
 logging:
-  level: info  # debug, info, warn, error
-  json: false
-
-updates:
-  self_update: false
-  channel: stable
-  verify_signature: true
+  level: info
 ```
-
-## Use Cases
-
-### Homelab Security
-- Enforce patch compliance before accessing services
-- Ensure firewall enabled on all devices
-- Require disk encryption on laptops
-- Monitor Tailscale client health
-
-### Remote Work
-- Verify employee device compliance
-- Enforce security baselines (firewall, encryption, updates)
-- Automatic compliance reporting
-- Non-compliant device isolation
-
-### ML Infrastructure
-- Ensure GPU workstations meet security standards
-- Verify Secure Boot + TPM on sensitive compute
-- Track update status across fleet
-- Enforce before granting training job access
-
-### IoT Fleet Management
-- Track firmware versions
-- Monitor update compliance
-- Detect configuration drift
-- Automated remediation
-
-## Architecture
-
-```mermaid
-graph TB
-    A[Agent] -->|Signed Reports| S[Server]
-    S -->|Policy Evaluation| P[Policy Engine]
-    P -->|Compliant| E1[Grant Tailscale Tag]
-    P -->|Non-Compliant| E2[Revoke Tailscale Tag]
-    E1 --> T[Tailscale ACL]
-    E2 --> T
-    T -->|Enforce Access| SVC[Services]
-```
-
-**Agent** collects posture → **Server** evaluates policy → **Enforcement** updates Tailscale ACLs
 
 ## API
 
-### Enrollment
-
+### Enroll Agent
 ```http
 POST /v1/enroll
-Content-Type: application/json
-
 {
-  "token": "one-time-token-123",
-  "node_id": "n1234abcd",
+  "token": "enrollment-token",
+  "node_id": "tailscale-node-id",
   "hostname": "dev-laptop",
-  "public_key": "base64-encoded-ed25519-public-key",
-  "os_info": "linux/amd64"
-}
-
-Response:
-{
-  "agent_id": "agent-uuid",
-  "server_version": "v0.1.0",
-  "min_version": "v0.1.0",
-  "policy_etag": "abc123"
+  "public_key": "ed25519-pubkey-base64"
 }
 ```
 
 ### Report Posture
-
 ```http
 POST /v1/report
-Content-Type: application/json
-X-Vouch-Agent-ID: agent-uuid
-X-Vouch-Signature: ed25519-signature-base64
-X-Vouch-Timestamp: 2024-10-20T02:00:00Z
-X-Vouch-Nonce: random-nonce
+Headers:
+  X-Vouch-Agent-ID: agent-uuid
+  X-Vouch-Signature: ed25519-signature
+  X-Vouch-Timestamp: 2024-10-20T02:00:00Z
 
-{
-  "hostname": "dev-laptop",
-  "agent_version": "v0.1.0",
-  "node_id": "n1234abcd",
-  "tailscale": {
-    "version": "1.56.0",
-    "auto_update": true,
-    "release_track": "stable",
-    "state_encrypted": false,
-    "online": true
-  },
-  "firewall": {
-    "enabled": true,
-    "type": "ufw",
-    "default_policy": "deny"
-  },
-  "updates": {
-    "auto_update_enabled": true,
-    "last_update_time": "2024-10-15T10:00:00Z",
-    "updates_outstanding": 0,
-    "reboot_pending": false
-  },
-  "secure_boot": {
-    "secure_boot_enabled": true,
-    "tpm_present": true,
-    "tpm_version": "2.0"
-  }
-}
-
-Response:
-{
-  "status": "ok",
-  "compliant": true,
-  "violations": [],
-  "min_version": "v0.1.0"
-}
+Body: {posture data}
 ```
 
-## Examples
+### Query Devices
+```http
+GET /v1/devices
+GET /v1/devices/:hostname
+```
 
-See [`examples/`](examples/) for:
+## CLI
 
-- **[Strict Policy](examples/policies/strict.yaml)** - Production security (7-day updates)
-- **[Homelab Policy](examples/policies/homelab.yaml)** - Relaxed dev environment (60-day updates)
-- **[ML Workstation Policy](examples/policies/ml-workstation.yaml)** - GPU workstation requirements
-- **[Full Stack Docker Compose](examples/docker-compose/full-stack.yaml)** - Server + Grafana + Prometheus
-- **[Systemd Service](examples/systemd/vouch-agent-dev-desktop.service)** - Agent service file
+```bash
+vouch status              # Overall compliance
+vouch devices             # List devices
+vouch device hostname     # Device details
+```
 
-## Building from Source
+## Posture Checks
+
+### Always Collected
+- Hostname, OS (linux/darwin/windows), architecture
+- OS name (Ubuntu 24.04, macOS 14, Windows 11)
+- Kernel version
+- Last update timestamp
+- Auto-update enabled/disabled
+- Pending updates count
+- Reboot pending flag
+
+### When Enabled
+- **Disk encryption**: Per-volume encryption status (LUKS/FileVault/BitLocker)
+- **Firewall**: Enabled status and type (ufw/iptables/nftables/pf/windows-defender)
+- **Tailscale**: Client version, auto-update status, online status, node ID
+- **Secure Boot**: UEFI Secure Boot enabled, TPM present and version
+- **Services**: Critical services running (sshd, docker, tailscaled)
+
+### Implementation Details
+
+- Runs 8 probes in parallel with 10s total timeout
+- Individual probe failures don't break collection
+- Errors reported per-probe in `errors` map
+- Uses `tailscale status --json` for accurate parsing
+- Extracts PRETTY_NAME from `/etc/os-release` (not full file)
+- Supports apt/dnf/pacman/apk for update detection
+- Cross-platform (Linux/macOS/Windows)
+
+## Security
+
+- **Signed requests**: All agent reports use Ed25519 signatures
+- **Replay protection**: 5-minute validity window with nonce
+- **Identity binding**: Agent identity tied to Tailscale node ID
+- **Enrollment tokens**: One-time tokens prevent unauthorized registration
+- **Key storage**: Private keys stored with 0600 permissions
+
+## Enforcement
+
+When `--enforce` flag is set, server automatically:
+1. Evaluates posture against policy
+2. Updates Tailscale device tags via API (`tag:compliant` or removal)
+3. ACLs can then restrict access based on tag presence
+
+Requires Tailscale API key with device tag permissions.
+
+## Building
 
 ```bash
 git clone https://github.com/haasonsaas/vouch
@@ -328,82 +182,68 @@ cd vouch
 make build
 
 # Binaries in bin/
-./bin/vouch-server --help
-./bin/vouch-agent --help
-./bin/vouch --help
+./bin/vouch-server
+./bin/vouch-agent  
+./bin/vouch
 ```
 
-## Security Model
+## Examples
 
-1. **Enrollment** - Agent generates Ed25519 keypair, enrolls with one-time token
-2. **Identity** - Agent identity bound to Tailscale node ID
-3. **Signing** - Every report signed with private key, verified by server
-4. **Replay protection** - 5-minute validity window, nonce tracking
-5. **Enforcement** - Server updates Tailscale ACLs based on compliance
+- [`examples/policies/`](examples/policies/) - Policy configurations
+- [`examples/docker-compose/`](examples/docker-compose/) - Deployment examples
+- [`examples/systemd/`](examples/systemd/) - Service files
+
+## Technical Details
+
+### Collector Architecture
+
+Uses `CollectorV2` with:
+- Context-based timeouts (no hanging probes)
+- Parallel execution (8 probes complete in ~2s)
+- Structured error reporting
+- Graceful degradation on probe failures
+
+### Report Format
+
+```json
+{
+  "hostname": "dev-laptop",
+  "os": "linux",
+  "arch": "amd64",
+  "os_name": "Ubuntu 24.04",
+  "kernel": "6.8.0-47-generic",
+  "last_update_time": "2024-10-15T10:00:00Z",
+  "updates_outstanding": 0,
+  "auto_update_enabled": true,
+  "reboot_pending": false,
+  "root_volume_encrypted": true,
+  "encryption_type": "luks",
+  "tailscale_version": "1.56.0",
+  "tailscale_online": true,
+  "firewall_enabled": true,
+  "firewall_type": "ufw",
+  "secure_boot_enabled": true,
+  "tpm_present": true,
+  "tpm_version": "2.0",
+  "errors": {}
+}
+```
 
 ## Monitoring
 
-Vouch exposes Prometheus metrics:
+Prometheus metrics at `/metrics`:
+- `vouch_devices_total`
+- `vouch_devices_compliant`
+- `vouch_policy_evaluations_total`
 
-```yaml
-# prometheus.yml
-scrape_configs:
-  - job_name: 'vouch'
-    static_configs:
-      - targets: ['vouch-server:8080']
-```
+## Status
 
-**Metrics:**
-- `vouch_devices_total` - Total enrolled devices
-- `vouch_devices_compliant` - Compliant device count
-- `vouch_policy_evaluations_total` - Policy checks performed
-- `vouch_enforcement_actions_total` - ACL updates executed
-
-## FAQ
-
-**Q: How is this different from Tailscale Enterprise posture checks?**  
-A: Vouch is self-hosted, open source, and fully customizable. You control the policies, data, and enforcement. Perfect for homelabs, small teams, or organizations wanting more control.
-
-**Q: Does this work without Tailscale Enterprise?**  
-A: Yes! Vouch works with regular Tailscale using the public API for ACL management.
-
-**Q: Can I use this with existing MDM/EDR tools?**  
-A: Yes, Vouch complements existing tools. Future versions will integrate with CrowdStrike, Jamf, Intune, etc.
-
-**Q: What happens if an agent goes offline?**  
-A: Server tracks last-seen time. You can configure policies to revoke access after N minutes of no contact.
-
-**Q: How do I update policies without restarting?**  
-A: Server hot-reloads safe policy changes. Critical auth/identity changes require restart.
-
-## Roadmap
-
-- [x] Core posture collection
-- [x] Policy engine
-- [x] Ed25519 signed requests
-- [x] Tailscale integration
-- [x] Comprehensive security checks
-- [ ] Web UI dashboard
-- [ ] Self-update with signature verification
-- [ ] Windows agent support
-- [ ] EDR/MDM integration
-- [ ] Hardware attestation (TPM quotes)
+Alpha. Core functionality implemented. Not recommended for production use yet.
 
 ## License
 
-Apache 2.0 - See [LICENSE](LICENSE)
+Apache 2.0
 
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md)
-
-## Status
-
-**Alpha** - Core functionality complete, actively developed
-
----
-
-Built for zero-trust homelabs and security-conscious teams.
-
-**Repository**: https://github.com/haasonsaas/vouch  
-**Latest Release**: https://github.com/haasonsaas/vouch/releases/latest
