@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,7 @@ type Server struct {
 	tokensMu         sync.Mutex
 	deviceMu         sync.Mutex
 	nonceStore       *NonceStore
+	rateLimiter      *RateLimiter
 }
 
 func main() {
@@ -100,6 +102,7 @@ func main() {
 		enrollAdminToken: enrollAdmin,
 	}
 	srv.nonceStore = NewNonceStore(db, 5*time.Minute)
+	srv.rateLimiter = NewRateLimiter()
 
 	// Initialize enforcer if enabled
 	if *enableEnforcement {
@@ -117,7 +120,9 @@ func main() {
 	// Setup HTTP routes
 	r := gin.Default()
 	srv.registerEnrollmentRoutes(r)
-	r.POST("/v1/report", srv.handleReport)
+	r.POST("/v1/report", srv.rateLimited("report", 120, time.Minute, func(c *gin.Context) string {
+		return c.GetHeader("X-Vouch-Agent-ID")
+	}, srv.handleReport))
 	r.GET("/v1/devices", srv.listDevices)
 	r.GET("/v1/devices/:hostname", srv.getDevice)
 	r.POST("/v1/enforce/:hostname", srv.manualEnforce)
@@ -173,6 +178,21 @@ func (s *Server) handleReport(c *gin.Context) {
 		"compliant":  eval.Compliant,
 		"violations": eval.Violations,
 	})
+}
+
+func (s *Server) rateLimited(bucket string, limit int, window time.Duration, keyFunc func(*gin.Context) string, next gin.HandlerFunc) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := keyFunc(c)
+		if key == "" {
+			key = c.ClientIP()
+		}
+		if !s.rateLimiter.Allow(bucket+":"+key, limit, window) {
+			c.Header("Retry-After", strconv.Itoa(int(window.Seconds())))
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+			return
+		}
+		next(c)
+	}
 }
 
 func (s *Server) authenticateReport(c *gin.Context) (posture.Report, *DeviceState, error) {

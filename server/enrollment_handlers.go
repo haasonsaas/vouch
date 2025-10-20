@@ -18,7 +18,9 @@ import (
 )
 
 func (s *Server) registerEnrollmentRoutes(r *gin.Engine) {
-	r.POST("/v1/enroll", s.handleEnrollment)
+	r.POST("/v1/enroll", s.rateLimited("enroll", 30, time.Minute, func(c *gin.Context) string {
+		return c.ClientIP()
+	}, s.handleEnrollment))
 	admin := r.Group("/v1/enroll", s.requireAdmin)
 	admin.POST("/tokens", s.handleIssueToken)
 	admin.GET("/tokens", s.handleListTokens)
