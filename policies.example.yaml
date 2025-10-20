@@ -1,0 +1,12 @@
+rules:
+  - name: require-recent-updates
+    check: "update_age_days < 30"
+    action: deny
+    
+  - name: require-encryption
+    check: "disk_encrypted == true"
+    action: deny
+    
+  - name: block-outdated-kernel
+    check: "kernel_version >= 6.0"
+    action: deny
