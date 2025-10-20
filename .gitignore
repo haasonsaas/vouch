@@ -22,6 +22,8 @@ config.yaml
 *.db
 *.sqlite
 
+# Allow go.sum - required for builds
+
 # IDE
 .vscode/
 .idea/

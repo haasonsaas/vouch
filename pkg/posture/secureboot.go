@@ -1,6 +1,7 @@
 package posture
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"runtime"
