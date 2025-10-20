@@ -1,0 +1,19 @@
+[Unit]
+Description=Vouch Agent - Device Attestation Reporter
+After=network-online.target tailscaled.service
+Wants=network-online.target
+Requires=tailscaled.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/vouch/agent.conf
+ExecStart=/usr/local/bin/vouch-agent \
+    --server ${SERVER_URL} \
+    --interval ${REPORT_INTERVAL}
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

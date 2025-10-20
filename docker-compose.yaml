@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  vouch-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: vouch-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./policies.example.yaml:/etc/vouch/policies.yaml:ro
+      - vouch-data:/var/lib/vouch
+    environment:
+      - TAILSCALE_API_KEY=${TAILSCALE_API_KEY}
+      - TAILNET=${TAILNET}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:8080/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Example agent (typically runs on separate hosts)
+  vouch-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: vouch-agent
+    depends_on:
+      - vouch-server
+    environment:
+      - SERVER_URL=http://vouch-server:8080
+    restart: unless-stopped
+    # For posture collection, needs access to host
+    privileged: true
+    network_mode: host
+    volumes:
+      - /etc:/host/etc:ro
+      - /var:/host/var:ro
+
+volumes:
+  vouch-data:

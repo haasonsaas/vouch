@@ -1,0 +1,31 @@
+[Unit]
+Description=Vouch Server - Device Attestation Control Plane
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vouch
+Group=vouch
+WorkingDirectory=/var/lib/vouch
+ExecStart=/usr/local/bin/vouch-server \
+    --listen :8080 \
+    --policy /etc/vouch/policies.yaml \
+    --db /var/lib/vouch/vouch.db
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/vouch
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
