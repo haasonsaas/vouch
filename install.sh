@@ -99,3 +99,13 @@ echo ""
 echo "Next steps:"
 echo "1. Update ${CONFIG_DIR}/agent.conf with your server URL"
 echo "2. Start the agent: sudo systemctl start vouch-agent"
+
+# Auto-detect latest version from GitHub
+if [ "$VERSION" = "latest" ]; then
+    VERSION=$(curl -s https://api.github.com/repos/haasonsaas/vouch/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+    if [ -z "$VERSION" ]; then
+        echo "Failed to detect latest version"
+        exit 1
+    fi
+    echo "Latest version: $VERSION"
+fi

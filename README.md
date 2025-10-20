@@ -12,61 +12,70 @@ Vouch adds device posture checks to your Tailscale network without requiring Ent
 - 🔌 **Tailscale-native** - Integrates via ACL API
 - 🏠 **Self-hosted** - Full control, no SaaS required
 
-## Architecture
-
-```
-Device Agents → Control Plane → Enforcement
-    ↓              ↓                ↓
-  Posture        Policy           Tailscale ACLs
-  Collection     Evaluation       Firewall Rules
-                                  Service Auth
-```
-
 ## Quick Start
 
-### 1. Clone and Build
+### One-Line Install (Linux/macOS)
 
 ```bash
-git clone https://github.com/haasonsaas/vouch
-cd vouch
-make build
+curl -fsSL https://raw.githubusercontent.com/haasonsaas/vouch/main/install.sh | sh
 ```
 
-### 2. Start Server
+### Or Download Binary
+
+Download the latest release for your platform:
+
+**Latest Release:** [Releases](https://github.com/haasonsaas/vouch/releases/latest)
 
 ```bash
-./bin/vouch-server --policy policies.example.yaml
+# Linux AMD64
+wget https://github.com/haasonsaas/vouch/releases/latest/download/vouch-agent-linux-amd64
+chmod +x vouch-agent-linux-amd64
+sudo mv vouch-agent-linux-amd64 /usr/local/bin/vouch-agent
+
+# macOS ARM64 (Apple Silicon)
+wget https://github.com/haasonsaas/vouch/releases/latest/download/vouch-agent-darwin-arm64
+chmod +x vouch-agent-darwin-arm64
+sudo mv vouch-agent-darwin-arm64 /usr/local/bin/vouch-agent
 ```
 
-### 3. Start Agent
+### Docker
 
 ```bash
-./bin/vouch-agent --server http://localhost:8080 --interval 5m
-```
+# Server
+docker pull ghcr.io/haasonsaas/vouch-server:latest
 
-### 4. Check Status
-
-```bash
-./bin/vouch status
-./bin/vouch devices
-```
-
-## Docker Deployment
-
-```bash
-# Build images
-docker build -t vouch-server -f Dockerfile.server .
-docker build -t vouch-agent -f Dockerfile.agent .
+# Agent
+docker pull ghcr.io/haasonsaas/vouch-agent:latest
 
 # Run with docker-compose
 docker-compose up -d
 ```
 
+## Usage
+
+### Start Server
+
+```bash
+vouch-server --policy policies.yaml --listen :8080
+```
+
+### Start Agent
+
+```bash
+vouch-agent --server http://vouch-server:8080 --interval 5m
+```
+
+### Check Status
+
+```bash
+vouch status          # Overall compliance
+vouch devices         # List all devices
+vouch device hostname # Device details
+```
+
 ## Configuration
 
-### Policies
-
-Define compliance rules in YAML:
+### Policy Example
 
 ```yaml
 # policies.yaml
@@ -84,40 +93,37 @@ rules:
     action: deny
 ```
 
-### Server
+### Enable Enforcement
 
 ```bash
 vouch-server \
-  --listen :8080 \
   --policy policies.yaml \
-  --db vouch.db \
   --enforce \
-  --tailscale-api-key tskey-api-xxx \
+  --tailscale-api-key $TAILSCALE_API_KEY \
   --tailnet example.com
 ```
 
-### Agent
+## Building from Source
 
 ```bash
-vouch-agent \
-  --server http://vouch-server:8080 \
-  --interval 5m
+git clone https://github.com/haasonsaas/vouch
+cd vouch
+make build
+
+# Binaries in bin/
+./bin/vouch-server --help
+./bin/vouch-agent --help
+./bin/vouch --help
 ```
 
-## CLI Commands
+## Architecture
 
-```bash
-# Show overall compliance status
-vouch status
-
-# List all devices
-vouch devices
-
-# Show device details
-vouch device hostname
-
-# Manual enforcement
-vouch enforce hostname
+```
+Device Agents → Control Plane → Enforcement
+    ↓              ↓                ↓
+  Posture        Policy           Tailscale ACLs
+  Collection     Evaluation       Firewall Rules
+                                  Service Auth
 ```
 
 ## Features
@@ -125,95 +131,64 @@ vouch enforce hostname
 - ✅ OS update age tracking
 - ✅ Disk encryption detection
 - ✅ Kernel version enforcement
-- ✅ Service allowlist/blocklist
+- ✅ Service monitoring
 - ✅ Real-time compliance status
-- ✅ Tailscale ACL auto-update
-- ✅ Webhook notifications
-- 🚧 EDR integration (planned)
-- 🚧 Certificate validation (planned)
+- ✅ Tailscale ACL integration
+- ✅ REST API
+- 🚧 Web UI (planned)
 - 🚧 Windows agent (planned)
-
-## Collected Metrics
-
-- OS version & patch level
-- Kernel version
-- Last update timestamp
-- Disk encryption status
-- Running services
-- Tailscale node ID
+- 🚧 EDR integration (planned)
 
 ## API
 
-### Report Device Posture
-```http
-POST /v1/report
-Content-Type: application/json
+### Report Posture
 
-{
-  "node_id": "n1234...",
-  "hostname": "dev-laptop",
-  "posture": {
+```bash
+curl -X POST http://localhost:8080/v1/report \
+  -H "Content-Type: application/json" \
+  -d '{
+    "node_id": "n123",
+    "hostname": "dev-laptop",
     "os_release": "Ubuntu 24.04",
     "kernel": "6.8.0-47",
-    "last_update": 1729123456,
+    "last_update_time": 1729123456,
     "disk_encrypted": true
-  }
-}
+  }'
 ```
 
-### Query Device Status
-```http
-GET /v1/devices/{hostname}
-
-Response:
-{
-  "hostname": "dev-laptop",
-  "compliant": true,
-  "last_seen": "2024-10-20T02:00:00Z",
-  "violations": []
-}
-```
-
-## Building
-
-### Requirements
-- Go 1.21+
-- Docker (for container builds)
-- CGO enabled for SQLite
-
-### Local Build
+### List Devices
 
 ```bash
-make build
+curl http://localhost:8080/v1/devices
 ```
 
-### Cross-Platform Build (Docker)
+### Get Device Status
 
 ```bash
-make docker
+curl http://localhost:8080/v1/devices/dev-laptop
 ```
 
 ## Use Cases
 
-### Homelab Security
-Ensure dev machines are patched before accessing production services.
+- **Homelab Security** - Enforce patch levels before accessing services
+- **Remote Work** - Verify device compliance for employee machines
+- **IoT Fleet** - Track firmware versions across devices
+- **ML Infrastructure** - Ensure GPU workstations meet baselines
 
-### Remote Work
-Enforce company security standards on employee devices.
+## CI/CD
 
-### IoT Fleet Management
-Verify firmware versions and configurations across devices.
+Vouch uses GitHub Actions for automated releases:
 
-### ML Infrastructure
-Ensure GPU workstations meet security baselines before training jobs.
+- **Push tag** → Automatic build for Linux/macOS (amd64/arm64)
+- **Docker images** → Published to `ghcr.io/haasonsaas/vouch-{server,agent}`
+- **Release notes** → Auto-generated from commits
 
-## Security Considerations
+To create a release:
 
-- Agent-server communication should use TLS
-- Store Tailscale API keys in environment variables
-- Rotate API keys regularly
-- Audit policy changes
-- Monitor for agent tampering
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
 
 ## Contributing
 
@@ -221,20 +196,11 @@ Contributions welcome! Please open an issue first to discuss changes.
 
 ## License
 
-Apache 2.0 - See [LICENSE](LICENSE)
+Apache 2.0
 
 ## Status
 
-🚧 **Early Development** - Core functionality implemented, not production-ready yet
-
-## Roadmap
-
-- [ ] v0.1: Core agent + server + basic policies ✅
-- [ ] v0.2: Tailscale ACL integration ✅
-- [ ] v0.3: Web UI for device management
-- [ ] v0.4: Windows agent support
-- [ ] v0.5: EDR integration (CrowdStrike, etc.)
-- [ ] v1.0: Production-ready release
+🚧 **Early Development** - Core functionality working, not production-ready yet
 
 ---
 
