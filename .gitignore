@@ -4,6 +4,10 @@ bin/
 *.dll
 *.so
 *.dylib
+vouch-agent-*
+vouch-server-*
+vouch-linux-*
+vouch-darwin-*
 
 # Build artifacts
 dist/
@@ -30,3 +34,10 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Test coverage
+coverage.out
+*.test
+
+# Go
+vendor/
