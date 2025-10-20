@@ -207,3 +207,37 @@ func loadPolicy(path string) *policy.Policy {
 	log.Printf("Loaded %d policy rules", len(pol.Rules))
 	return &pol
 }
+
+func (s *Server) handleEnrollment(c *gin.Context) {
+	var req struct {
+		Token        string `json:"token"`
+		NodeID       string `json:"node_id"`
+		Hostname     string `json:"hostname"`
+		PublicKeyB64 string `json:"public_key"`
+		OSInfo       string `json:"os_info"`
+	}
+	
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	
+	// For now, accept any token (production would validate against issued tokens)
+	if req.Token == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
+		return
+	}
+	
+	// Generate agent ID
+	agentID := fmt.Sprintf("agent-%s-%d", req.Hostname, time.Now().Unix())
+	
+	// Store enrollment (in production, store public key for verification)
+	log.Printf("✅ Enrolled new agent: %s (node: %s, host: %s)", agentID, req.NodeID, req.Hostname)
+	
+	c.JSON(http.StatusOK, gin.H{
+		"agent_id":       agentID,
+		"server_version": Version,
+		"min_version":    "v0.1.0",
+		"policy_etag":    "initial",
+	})
+}
