@@ -1,16 +1,22 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/haasonsaas/vouch/pkg/auth"
 	"github.com/haasonsaas/vouch/pkg/enforcement"
 	"github.com/haasonsaas/vouch/pkg/policy"
 	"github.com/haasonsaas/vouch/pkg/posture"
@@ -39,6 +45,7 @@ type Server struct {
 	enrollAdminToken string
 	tokensMu         sync.Mutex
 	deviceMu         sync.Mutex
+	nonceStore       *NonceStore
 }
 
 func main() {
@@ -92,6 +99,7 @@ func main() {
 		tokenHasher:      NewTokenHasher(saltBytes),
 		enrollAdminToken: enrollAdmin,
 	}
+	srv.nonceStore = NewNonceStore(db, 5*time.Minute)
 
 	// Initialize enforcer if enabled
 	if *enableEnforcement {
@@ -122,32 +130,26 @@ func main() {
 }
 
 func (s *Server) handleReport(c *gin.Context) {
-	var report posture.Report
-	if err := c.ShouldBindJSON(&report); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	report, device, err := s.authenticateReport(c)
+	if err != nil {
 		return
 	}
 
-	// Evaluate policy
 	eval := policy.Evaluate(&report, s.policy)
-
-	// Serialize violations
 	violations, _ := json.Marshal(eval.Violations)
 	postureRaw, _ := json.Marshal(report)
 
-	// Store device state
-	state := DeviceState{
-		Hostname:   report.Hostname,
-		NodeID:     report.NodeID,
-		Compliant:  eval.Compliant,
-		LastSeen:   time.Now(),
-		Violations: string(violations),
-		PostureRaw: string(postureRaw),
+	device.Compliant = eval.Compliant
+	device.LastSeen = time.Now().UTC()
+	device.Violations = string(violations)
+	device.PostureRaw = string(postureRaw)
+
+	if err := s.db.Save(device).Error; err != nil {
+		log.Printf("❌ Failed to persist device state %s: %v", device.AgentID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist device"})
+		return
 	}
 
-	s.db.Save(&state)
-
-	// Enforce via Tailscale if enabled
 	if s.enforcer != nil && report.NodeID != "unknown" {
 		if eval.Compliant {
 			if err := s.enforcer.GrantAccess(report.NodeID); err != nil {
@@ -171,6 +173,77 @@ func (s *Server) handleReport(c *gin.Context) {
 		"compliant":  eval.Compliant,
 		"violations": eval.Violations,
 	})
+}
+
+func (s *Server) authenticateReport(c *gin.Context) (posture.Report, *DeviceState, error) {
+	var empty posture.Report
+	agentID := c.GetHeader("X-Vouch-Agent-ID")
+	signature := c.GetHeader("X-Vouch-Signature")
+	timestamp := c.GetHeader("X-Vouch-Timestamp")
+	nonce := c.GetHeader("X-Vouch-Nonce")
+
+	if agentID == "" || signature == "" || timestamp == "" || nonce == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authentication headers"})
+		return empty, nil, errors.New("missing headers")
+	}
+
+	bodyBytes, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read body"})
+		return empty, nil, err
+	}
+	// reset body for downstream readers
+	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+	var report posture.Report
+	if err := json.Unmarshal(bodyBytes, &report); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return empty, nil, err
+	}
+
+	var device DeviceState
+	if err := s.db.Where("agent_id = ?", agentID).First(&device).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "agent not enrolled"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load device"})
+		}
+		return empty, nil, err
+	}
+
+	if report.NodeID == "" || !strings.EqualFold(report.NodeID, device.NodeID) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "node mismatch"})
+		return empty, nil, errors.New("node mismatch")
+	}
+
+	if len(device.PublicKey) != ed25519.PublicKeySize {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing public key"})
+		return empty, nil, errors.New("missing public key")
+	}
+
+	ts, err := time.Parse(time.RFC3339, timestamp)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid timestamp"})
+		return empty, nil, err
+	}
+
+	signed := &auth.SignedRequest{
+		Body:      bodyBytes,
+		Timestamp: ts,
+		Nonce:     nonce,
+		Signature: signature,
+	}
+
+	if err := auth.VerifySignedRequest(device.PublicKey, signed, 5*time.Minute); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return empty, nil, err
+	}
+
+	if err := s.nonceStore.CheckAndStore(agentID, nonce, ts); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+		return empty, nil, err
+	}
+
+	return report, &device, nil
 }
 
 func (s *Server) listDevices(c *gin.Context) {
