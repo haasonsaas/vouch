@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  vouch-server:
+    image: vouch-server
+    container_name: vouch-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./policies.example.yaml:/etc/vouch/policies.yaml:ro
+      - vouch-data:/var/lib/vouch
+    restart: unless-stopped
+
+volumes:
+  vouch-data:

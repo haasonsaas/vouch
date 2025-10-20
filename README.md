@@ -231,3 +231,41 @@ Built with ❤️ for zero-trust homelabs and small teams who need BeyondCorp-st
 ---
 
 **Status**: 🚧 Early development - not production ready yet
+
+## Deployment Status
+
+**Current Status**: 🚧 In Development
+
+The project has core functionality implemented:
+- ✅ Agent (posture collection)
+- ✅ Server (policy evaluation) 
+- ✅ CLI (device management)
+- ✅ Tailscale enforcement hooks
+- ✅ Docker images defined
+
+### Building Locally
+
+```bash
+# Build binaries (requires Go 1.21+)
+make build
+
+# Build Docker images
+docker build -t vouch-server -f Dockerfile.server .
+docker build -t vouch-agent -f Dockerfile.agent .
+```
+
+### Quick Test
+
+```bash
+# Start server
+./bin/vouch-server --policy policies.example.yaml
+
+# In another terminal, start agent
+./bin/vouch-agent --server http://localhost:8080 --interval 1m
+
+# Check status
+./bin/vouch status
+./bin/vouch devices
+```
+
+**Note**: SQLite driver requires CGO. For cross-platform builds, use Docker.
