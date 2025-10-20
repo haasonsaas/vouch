@@ -1,0 +1,11 @@
+# Relaxed policy for homelab/development environments
+rules:
+  - name: require-recent-updates
+    check: update_age_days < 60
+    action: deny
+    
+  - name: warn-old-updates
+    check: update_age_days < 90
+    action: warn
+    
+  # Encryption not required for dev environments

@@ -205,3 +205,38 @@ Apache 2.0
 ---
 
 Built for zero-trust homelabs and small teams who need BeyondCorp-style security without the enterprise price tag.
+
+## Examples
+
+Check the [`examples/`](examples/) directory for:
+
+- **Policy configurations**
+  - [`strict.yaml`](examples/policies/strict.yaml) - Production security policy
+  - [`homelab.yaml`](examples/policies/homelab.yaml) - Relaxed homelab policy
+  - [`ml-workstation.yaml`](examples/policies/ml-workstation.yaml) - ML/GPU workstation policy
+
+- **Docker deployments**
+  - [`full-stack.yaml`](examples/docker-compose/full-stack.yaml) - Complete stack with Grafana/Prometheus
+
+- **Systemd services**
+  - [`vouch-agent-dev-desktop.service`](examples/systemd/vouch-agent-dev-desktop.service) - Example agent service
+
+## Monitoring Integration
+
+Vouch exposes metrics at `/v1/metrics` for Prometheus scraping:
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: 'vouch'
+    static_configs:
+      - targets: ['vouch-server:8080']
+```
+
+Available metrics:
+- `vouch_devices_total` - Total devices reporting
+- `vouch_devices_compliant` - Compliant devices
+- `vouch_devices_noncompliant` - Non-compliant devices
+- `vouch_policy_evaluations_total` - Total policy evaluations
+- `vouch_enforcement_actions_total` - Enforcement actions taken
+

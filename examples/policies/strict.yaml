@@ -1,0 +1,13 @@
+# Strict security policy for production environments
+rules:
+  - name: require-very-recent-updates
+    check: update_age_days < 7
+    action: deny
+    
+  - name: require-encryption
+    check: disk_encrypted == true
+    action: deny
+    
+  - name: require-modern-kernel
+    check: kernel_version >= "6.0"
+    action: deny

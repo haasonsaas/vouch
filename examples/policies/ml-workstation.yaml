@@ -1,0 +1,16 @@
+# Policy for ML/GPU workstations
+rules:
+  - name: require-recent-updates
+    check: update_age_days < 30
+    action: deny
+    
+  - name: require-encryption
+    check: disk_encrypted == true
+    action: deny
+    
+  - name: require-nvidia-drivers
+    check: service_running nvidia-persistenced
+    action: warn
+    
+  # Note: Enforcement can be scheduled around training jobs
+  # to avoid disrupting long-running workloads
