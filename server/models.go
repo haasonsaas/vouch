@@ -18,8 +18,18 @@ type DeviceState struct {
 	NonCompliantSince *time.Time
 	TagCompliant      bool
 	LastEnforcedAt    *time.Time
+	RequiresRotation  bool
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+}
+
+// RotationChallenge stores pending public-key rotation challenges issued to agents.
+type RotationChallenge struct {
+	ID        uint   `gorm:"primaryKey"`
+	AgentID   string `gorm:"uniqueIndex"`
+	Nonce     string
+	IssuedAt  time.Time `gorm:"index"`
+	ExpiresAt time.Time `gorm:"index"`
 }
 
 // AgentNonce tracks recently seen nonces for replay detection.

@@ -22,7 +22,7 @@ type SignedRequest struct {
 func CreateSignedRequest(identity *Identity, body []byte) *SignedRequest {
 	timestamp := time.Now()
 	nonce := generateNonce()
-	
+
 	// Message format: timestamp|nonce|body
 	message := buildMessage(timestamp, nonce, body)
 	signature := identity.Sign(message)
@@ -72,4 +72,12 @@ func generateNonce() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func SignChallenge(priv ed25519.PrivateKey, challenge string) (string, error) {
+	if len(priv) == 0 {
+		return "", fmt.Errorf("empty private key")
+	}
+	sig := ed25519.Sign(priv, []byte(challenge))
+	return base64.StdEncoding.EncodeToString(sig), nil
 }

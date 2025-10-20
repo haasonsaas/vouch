@@ -5,6 +5,11 @@ import (
 	"time"
 )
 
+type rateLimitKey struct {
+	Bucket string
+	Key    string
+}
+
 type rateRecord struct {
 	count  int
 	reset  time.Time
@@ -14,21 +19,22 @@ type rateRecord struct {
 // RateLimiter tracks per-key request usage within a sliding window.
 type RateLimiter struct {
 	mu      sync.Mutex
-	entries map[string]rateRecord
+	entries map[rateLimitKey]rateRecord
 }
 
 func NewRateLimiter() *RateLimiter {
-	return &RateLimiter{entries: make(map[string]rateRecord)}
+	return &RateLimiter{entries: make(map[rateLimitKey]rateRecord)}
 }
 
 // Allow returns true if the caller may proceed under the provided limit and window.
-func (rl *RateLimiter) Allow(key string, limit int, window time.Duration) bool {
+func (rl *RateLimiter) Allow(bucket, key string, limit int, window time.Duration) bool {
 	if limit <= 0 {
 		return true
 	}
 	now := time.Now()
 	rl.mu.Lock()
-	rec := rl.entries[key]
+	composite := rateLimitKey{Bucket: bucket, Key: key}
+	rec := rl.entries[composite]
 	if rec.window == 0 || now.After(rec.reset) {
 		rec.count = 0
 		rec.window = window
@@ -39,7 +45,7 @@ func (rl *RateLimiter) Allow(key string, limit int, window time.Duration) bool {
 		return false
 	}
 	rec.count++
-	rl.entries[key] = rec
+	rl.entries[composite] = rec
 	rl.mu.Unlock()
 	return true
 }

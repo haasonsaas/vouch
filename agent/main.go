@@ -3,14 +3,18 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"math/rand"
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/haasonsaas/vouch/pkg/auth"
@@ -31,6 +35,7 @@ type Agent struct {
 	config   *config.AgentConfig
 	identity *auth.Identity
 	client   *http.Client
+	keyPath  string
 }
 
 func main() {
@@ -64,6 +69,7 @@ func main() {
 		client: &http.Client{
 			Timeout: time.Duration(cfg.Server.RequestTimeout) * time.Second,
 		},
+		keyPath: cfg.Auth.KeyPath,
 	}
 
 	// Load or enroll identity
@@ -101,10 +107,15 @@ func main() {
 
 func (a *Agent) loadOrEnroll() error {
 	// Try loading existing identity
-	identity, err := auth.LoadIdentity(a.config.Auth.KeyPath)
+	identity, err := auth.LoadIdentity(a.keyPath)
 	if err == nil {
 		a.identity = identity
 		log.Printf("✅ Loaded existing identity")
+		if a.config.Auth.AllowKeyRotation {
+			if err := a.ensureFreshKey(); err != nil {
+				log.Printf("⚠️  Key rotation check failed: %v", err)
+			}
+		}
 		return nil
 	}
 
@@ -161,12 +172,18 @@ func (a *Agent) enroll() error {
 	identity.NodeID = nodeID
 
 	// Save identity
-	if err := identity.Save(a.config.Auth.KeyPath); err != nil {
+	if err := identity.Save(a.keyPath); err != nil {
 		return err
 	}
 
 	a.identity = identity
 	log.Printf("✅ Enrollment successful - Agent ID: %s", identity.AgentID)
+
+	if a.config.Auth.AllowKeyRotation {
+		if err := a.ensureFreshKey(); err != nil {
+			log.Printf("⚠️  Post-enrollment rotation check failed: %v", err)
+		}
+	}
 
 	return nil
 }
@@ -200,10 +217,10 @@ func (a *Agent) reportPosture() {
 	}
 
 	var response struct {
-		Status      string   `json:"status"`
-		Compliant   bool     `json:"compliant"`
-		Violations  []string `json:"violations"`
-		MinVersion  string   `json:"min_version,omitempty"`
+		Status     string   `json:"status"`
+		Compliant  bool     `json:"compliant"`
+		Violations []string `json:"violations"`
+		MinVersion string   `json:"min_version,omitempty"`
 	}
 	json.NewDecoder(resp.Body).Decode(&response)
 
@@ -223,16 +240,164 @@ func (a *Agent) collectComprehensivePosture() map[string]interface{} {
 	// Use production-ready CollectorV2
 	collector := posture.NewCollectorV2(10 * time.Second)
 	ctx := context.Background()
-	
+
 	reportV2 := collector.Collect(ctx)
-	
+
 	// Convert to map for JSON marshaling
 	data, _ := json.Marshal(reportV2)
 	var report map[string]interface{}
 	json.Unmarshal(data, &report)
-	
+
 	// Add agent metadata
 	report["agent_version"] = Version
-	
+
 	return report
+}
+
+func (a *Agent) ensureFreshKey() error {
+	if !a.config.Auth.AllowKeyRotation {
+		return nil
+	}
+	challenge, err := a.requestRotationChallenge()
+	if err != nil || challenge == nil {
+		return err
+	}
+
+	newID, err := auth.GenerateIdentity()
+	if err != nil {
+		return err
+	}
+
+	sig, err := auth.SignChallenge(newID.PrivateKey, challenge.Challenge)
+	if err != nil {
+		return err
+	}
+
+	payload := map[string]string{
+		"challenge":  challenge.Challenge,
+		"public_key": base64.StdEncoding.EncodeToString(newID.PublicKey),
+		"signature":  sig,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+
+	if err := a.submitRotation(body); err != nil {
+		return err
+	}
+
+	newID.AgentID = a.identity.AgentID
+	newID.NodeID = a.identity.NodeID
+
+	if err := a.persistIdentity(newID); err != nil {
+		return err
+	}
+
+	a.identity = newID
+	log.Printf("🔑 Rotated agent key successfully")
+	return nil
+}
+
+type rotationChallenge struct {
+	Challenge string    `json:"challenge"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+func (a *Agent) requestRotationChallenge() (*rotationChallenge, error) {
+	req, err := a.newSignedRequest(http.MethodPost, "/v1/keys/rotate", []byte("{}"))
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusNoContent:
+		return nil, nil
+	case http.StatusOK:
+		var challenge rotationChallenge
+		if err := json.NewDecoder(resp.Body).Decode(&challenge); err != nil {
+			return nil, err
+		}
+		if challenge.Challenge == "" {
+			return nil, errors.New("rotation challenge missing nonce")
+		}
+		return &challenge, nil
+	case http.StatusTooManyRequests:
+		return nil, fmt.Errorf("rotation challenge rate limited")
+	default:
+		data, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("challenge request failed: %d %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+}
+
+func (a *Agent) submitRotation(body []byte) error {
+	req, err := a.newSignedRequest(http.MethodPut, "/v1/keys/rotate", body)
+	if err != nil {
+		return err
+	}
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("rotate failed: %d %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+
+	return nil
+}
+
+func (a *Agent) newSignedRequest(method, path string, body []byte) (*http.Request, error) {
+	payload := body
+	if payload == nil {
+		payload = []byte("{}")
+	}
+	signed := auth.CreateSignedRequest(a.identity, payload)
+	req, err := http.NewRequest(method, a.endpoint(path), bytes.NewReader(signed.Body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Vouch-Agent-ID", a.identity.AgentID)
+	req.Header.Set("X-Vouch-Signature", signed.Signature)
+	req.Header.Set("X-Vouch-Timestamp", signed.Timestamp.Format(time.RFC3339))
+	req.Header.Set("X-Vouch-Nonce", signed.Nonce)
+	return req, nil
+}
+
+func (a *Agent) persistIdentity(newID *auth.Identity) error {
+	backup := a.keyPath + ".bak"
+	if _, err := os.Stat(a.keyPath); err == nil {
+		if err := os.Rename(a.keyPath, backup); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	if err := newID.Save(a.keyPath); err != nil {
+		if _, restoreErr := os.Stat(backup); restoreErr == nil {
+			_ = os.Rename(backup, a.keyPath)
+		}
+		return err
+	}
+
+	if err := os.Remove(backup); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func (a *Agent) endpoint(path string) string {
+	base := strings.TrimRight(a.config.Server.URL, "/")
+	return base + path
 }

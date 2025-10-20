@@ -48,6 +48,7 @@ type Server struct {
 	deviceMu         sync.Mutex
 	nonceStore       *NonceStore
 	rateLimiter      *RateLimiter
+	rotationMu       sync.Mutex
 }
 
 func main() {
@@ -62,7 +63,7 @@ func main() {
 	}
 
 	// Migrate schema
-	if err := db.AutoMigrate(&DeviceState{}, &EnrollmentToken{}); err != nil {
+	if err := db.AutoMigrate(&DeviceState{}, &EnrollmentToken{}, &RotationChallenge{}); err != nil {
 		log.Fatalf("Failed to migrate database schema: %v", err)
 	}
 
@@ -123,6 +124,7 @@ func main() {
 	r.POST("/v1/report", srv.rateLimited("report", 120, time.Minute, func(c *gin.Context) string {
 		return c.GetHeader("X-Vouch-Agent-ID")
 	}, srv.handleReport))
+	srv.registerKeyRotationRoutes(r)
 	r.GET("/v1/devices", srv.listDevices)
 	r.GET("/v1/devices/:hostname", srv.getDevice)
 	r.POST("/v1/enforce/:hostname", srv.manualEnforce)
@@ -186,7 +188,7 @@ func (s *Server) rateLimited(bucket string, limit int, window time.Duration, key
 		if key == "" {
 			key = c.ClientIP()
 		}
-		if !s.rateLimiter.Allow(bucket+":"+key, limit, window) {
+		if !s.rateLimiter.Allow(bucket, key, limit, window) {
 			c.Header("Retry-After", strconv.Itoa(int(window.Seconds())))
 			c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
 			return
