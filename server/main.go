@@ -1,21 +1,16 @@
 package main
 
 import (
-	"crypto/ed25519"
-	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"flag"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/haasonsaas/vouch/pkg/auth"
 	"github.com/haasonsaas/vouch/pkg/enforcement"
 	"github.com/haasonsaas/vouch/pkg/policy"
 	"github.com/haasonsaas/vouch/pkg/posture"
@@ -31,32 +26,19 @@ var (
 	tailscaleAPIKey   = flag.String("tailscale-api-key", "", "Tailscale API key (or set TAILSCALE_API_KEY)")
 	tailnet           = flag.String("tailnet", "", "Tailscale tailnet name")
 	enableEnforcement = flag.Bool("enforce", false, "Enable Tailscale ACL enforcement")
+	enrollTokenSalt   = flag.String("enroll-token-salt", "", "Hex-encoded secret used to hash enrollment tokens (or set VOUCH_ENROLL_SALT)")
+	enrollAdminToken  = flag.String("enroll-admin-token", "", "Bearer token required to manage enrollment tokens (or set VOUCH_ENROLL_ADMIN_TOKEN)")
 	Version           = "dev"
 )
 
-type DeviceState struct {
-	ID                uint   `gorm:"primaryKey"`
-	AgentID           string `gorm:"uniqueIndex"`
-	Hostname          string `gorm:"index"`
-	NodeID            string `gorm:"index"`
-	PublicKey         []byte
-	Compliant         bool
-	LastSeen          time.Time
-	Violations        string `gorm:"type:text"`
-	PostureRaw        string `gorm:"type:text"`
-	ConsecutiveFail   int
-	ConsecutivePass   int
-	NonCompliantSince *time.Time
-	TagCompliant      bool
-	LastEnforcedAt    *time.Time
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-}
-
 type Server struct {
-	db       *gorm.DB
-	policy   *policy.Policy
-	enforcer *enforcement.TailscaleEnforcer
+	db               *gorm.DB
+	policy           *policy.Policy
+	enforcer         *enforcement.TailscaleEnforcer
+	tokenHasher      TokenHasher
+	enrollAdminToken string
+	tokensMu         sync.Mutex
+	deviceMu         sync.Mutex
 }
 
 func main() {
@@ -71,14 +53,44 @@ func main() {
 	}
 
 	// Migrate schema
-	db.AutoMigrate(&DeviceState{})
+	if err := db.AutoMigrate(&DeviceState{}, &EnrollmentToken{}); err != nil {
+		log.Fatalf("Failed to migrate database schema: %v", err)
+	}
 
 	// Load policy
 	pol := loadPolicy(*policyFile)
 
+	salt := os.Getenv("VOUCH_ENROLL_SALT")
+	if *enrollTokenSalt != "" {
+		if salt != "" {
+			log.Printf("Warning: --enroll-token-salt overrides VOUCH_ENROLL_SALT")
+		}
+		salt = *enrollTokenSalt
+	}
+	if salt == "" {
+		log.Fatal("Missing enrollment token salt (set --enroll-token-salt or VOUCH_ENROLL_SALT)")
+	}
+	saltBytes, err := hex.DecodeString(salt)
+	if err != nil {
+		log.Fatalf("Invalid enrollment token salt: %v", err)
+	}
+
+	enrollAdmin := os.Getenv("VOUCH_ENROLL_ADMIN_TOKEN")
+	if *enrollAdminToken != "" {
+		if enrollAdmin != "" {
+			log.Printf("Warning: --enroll-admin-token overrides VOUCH_ENROLL_ADMIN_TOKEN")
+		}
+		enrollAdmin = *enrollAdminToken
+	}
+	if enrollAdmin == "" {
+		log.Fatal("Missing enrollment admin token (set --enroll-admin-token or VOUCH_ENROLL_ADMIN_TOKEN)")
+	}
+
 	srv := &Server{
-		db:     db,
-		policy: pol,
+		db:               db,
+		policy:           pol,
+		tokenHasher:      NewTokenHasher(saltBytes),
+		enrollAdminToken: enrollAdmin,
 	}
 
 	// Initialize enforcer if enabled
@@ -96,7 +108,7 @@ func main() {
 
 	// Setup HTTP routes
 	r := gin.Default()
-
+	srv.registerEnrollmentRoutes(r)
 	r.POST("/v1/report", srv.handleReport)
 	r.GET("/v1/devices", srv.listDevices)
 	r.GET("/v1/devices/:hostname", srv.getDevice)
@@ -222,38 +234,4 @@ func loadPolicy(path string) *policy.Policy {
 
 	log.Printf("Loaded %d policy rules", len(pol.Rules))
 	return &pol
-}
-
-func (s *Server) handleEnrollment(c *gin.Context) {
-	var req struct {
-		Token        string `json:"token"`
-		NodeID       string `json:"node_id"`
-		Hostname     string `json:"hostname"`
-		PublicKeyB64 string `json:"public_key"`
-		OSInfo       string `json:"os_info"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// For now, accept any token (production would validate against issued tokens)
-	if req.Token == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
-		return
-	}
-
-	// Generate agent ID
-	agentID := fmt.Sprintf("agent-%s-%d", req.Hostname, time.Now().Unix())
-
-	// Store enrollment (in production, store public key for verification)
-	log.Printf("✅ Enrolled new agent: %s (node: %s, host: %s)", agentID, req.NodeID, req.Hostname)
-
-	c.JSON(http.StatusOK, gin.H{
-		"agent_id":       agentID,
-		"server_version": Version,
-		"min_version":    "v0.1.0",
-		"policy_etag":    "initial",
-	})
 }

@@ -5,9 +5,9 @@ import "time"
 // DeviceState captures posture, identity bindings, and enforcement status for an agent.
 type DeviceState struct {
 	ID                uint   `gorm:"primaryKey"`
-	AgentID           string `gorm:"index"`
+	AgentID           string `gorm:"uniqueIndex"`
 	Hostname          string `gorm:"index"`
-	NodeID            string `gorm:"index"`
+	NodeID            string `gorm:"uniqueIndex"`
 	PublicKey         []byte
 	Compliant         bool
 	LastSeen          time.Time
@@ -32,10 +32,11 @@ type AgentNonce struct {
 
 // EnrollmentToken stores hashed, single-use enrollment tokens.
 type EnrollmentToken struct {
-	ID        uint `gorm:"primaryKey"`
-	Label     string
-	TokenHash string `gorm:"uniqueIndex"`
-	ExpiresAt time.Time
-	UsedAt    *time.Time
-	CreatedAt time.Time
+	ID         uint `gorm:"primaryKey"`
+	Label      string
+	TokenHash  string `gorm:"uniqueIndex"`
+	ExpiresAt  time.Time
+	UsedAt     *time.Time
+	RedeemedBy string
+	CreatedAt  time.Time
 }
