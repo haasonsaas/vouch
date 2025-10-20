@@ -24,23 +24,49 @@ Device Agents → Control Plane → Enforcement
 
 ## Quick Start
 
-### 1. Deploy Control Plane
+### 1. Clone and Build
 
 ```bash
-docker run -d \
-  -p 8080:8080 \
-  -v ./policies.yaml:/etc/vouch/policies.yaml \
-  ghcr.io/haasonsaas/vouch-server:latest
+git clone https://github.com/haasonsaas/vouch
+cd vouch
+make build
 ```
 
-### 2. Install Agent on Devices
+### 2. Start Server
 
 ```bash
-curl -fsSL https://vouch.dev/install.sh | sh
-vouch-agent --server https://vouch.example.com:8080
+./bin/vouch-server --policy policies.example.yaml
 ```
 
-### 3. Define Policies
+### 3. Start Agent
+
+```bash
+./bin/vouch-agent --server http://localhost:8080 --interval 5m
+```
+
+### 4. Check Status
+
+```bash
+./bin/vouch status
+./bin/vouch devices
+```
+
+## Docker Deployment
+
+```bash
+# Build images
+docker build -t vouch-server -f Dockerfile.server .
+docker build -t vouch-agent -f Dockerfile.agent .
+
+# Run with docker-compose
+docker-compose up -d
+```
+
+## Configuration
+
+### Policies
+
+Define compliance rules in YAML:
 
 ```yaml
 # policies.yaml
@@ -58,6 +84,42 @@ rules:
     action: deny
 ```
 
+### Server
+
+```bash
+vouch-server \
+  --listen :8080 \
+  --policy policies.yaml \
+  --db vouch.db \
+  --enforce \
+  --tailscale-api-key tskey-api-xxx \
+  --tailnet example.com
+```
+
+### Agent
+
+```bash
+vouch-agent \
+  --server http://vouch-server:8080 \
+  --interval 5m
+```
+
+## CLI Commands
+
+```bash
+# Show overall compliance status
+vouch status
+
+# List all devices
+vouch devices
+
+# Show device details
+vouch device hostname
+
+# Manual enforcement
+vouch enforce hostname
+```
+
 ## Features
 
 - ✅ OS update age tracking
@@ -69,103 +131,16 @@ rules:
 - ✅ Webhook notifications
 - 🚧 EDR integration (planned)
 - 🚧 Certificate validation (planned)
+- 🚧 Windows agent (planned)
 
-## Components
+## Collected Metrics
 
-### Agent (`vouch-agent`)
-Runs on each device, collects posture data, reports to control plane.
-
-**Collected Metrics:**
 - OS version & patch level
 - Kernel version
 - Last update timestamp
 - Disk encryption status
 - Running services
 - Tailscale node ID
-
-### Control Plane (`vouch-server`)
-Evaluates policies, maintains device state, enforces compliance.
-
-**Capabilities:**
-- Policy engine with custom rules
-- Device state database
-- Tailscale API integration
-- REST API for queries
-- Metrics & alerting
-
-### CLI (`vouch`)
-Management interface for policies and device status.
-
-```bash
-vouch status              # Show all device compliance
-vouch policy add [file]   # Add policy
-vouch device [hostname]   # Device details
-vouch enforce             # Manually trigger enforcement
-```
-
-## Use Cases
-
-### Homelab Security
-Ensure dev machines are patched before accessing production services.
-
-### Remote Work
-Enforce company security standards on employee devices.
-
-### IoT Fleet Management
-Verify firmware versions and configurations across devices.
-
-### ML Infrastructure
-Ensure GPU workstations meet security baselines before training jobs.
-
-## Installation
-
-### Requirements
-- Tailscale network
-- Docker (for control plane) or binary deployment
-- Tailscale API key with ACL write access
-
-### From Source
-
-```bash
-git clone https://github.com/haasonsaas/vouch
-cd vouch
-make build
-./bin/vouch-server --config config.yaml
-```
-
-## Configuration
-
-### Control Plane
-
-```yaml
-# config.yaml
-server:
-  listen: "0.0.0.0:8080"
-  tls:
-    cert: /etc/vouch/tls.crt
-    key: /etc/vouch/tls.key
-
-tailscale:
-  api_key: "tskey-api-..."
-  tailnet: "example.com"
-  
-database:
-  type: sqlite
-  path: /var/lib/vouch/devices.db
-
-policies:
-  file: /etc/vouch/policies.yaml
-  reload_interval: 60s
-```
-
-### Agent
-
-```bash
-# /etc/vouch/agent.conf
-server_url=https://vouch.example.com:8080
-report_interval=5m
-node_id=$(tailscale status --json | jq -r '.Self.ID')
-```
 
 ## API
 
@@ -199,73 +174,68 @@ Response:
 }
 ```
 
+## Building
+
+### Requirements
+- Go 1.21+
+- Docker (for container builds)
+- CGO enabled for SQLite
+
+### Local Build
+
+```bash
+make build
+```
+
+### Cross-Platform Build (Docker)
+
+```bash
+make docker
+```
+
+## Use Cases
+
+### Homelab Security
+Ensure dev machines are patched before accessing production services.
+
+### Remote Work
+Enforce company security standards on employee devices.
+
+### IoT Fleet Management
+Verify firmware versions and configurations across devices.
+
+### ML Infrastructure
+Ensure GPU workstations meet security baselines before training jobs.
+
 ## Security Considerations
 
-- Agent-server communication should use mTLS
-- Store Tailscale API keys in secure vault
+- Agent-server communication should use TLS
+- Store Tailscale API keys in environment variables
 - Rotate API keys regularly
 - Audit policy changes
-- Monitor agent tampering
+- Monitor for agent tampering
 
 ## Contributing
 
-Contributions welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) first.
+Contributions welcome! Please open an issue first to discuss changes.
 
 ## License
 
 Apache 2.0 - See [LICENSE](LICENSE)
 
+## Status
+
+🚧 **Early Development** - Core functionality implemented, not production-ready yet
+
 ## Roadmap
 
-- [ ] v0.1: Core agent + server + basic policies
-- [ ] v0.2: Tailscale ACL integration
+- [ ] v0.1: Core agent + server + basic policies ✅
+- [ ] v0.2: Tailscale ACL integration ✅
 - [ ] v0.3: Web UI for device management
 - [ ] v0.4: Windows agent support
 - [ ] v0.5: EDR integration (CrowdStrike, etc.)
 - [ ] v1.0: Production-ready release
 
-## Credits
-
-Built with ❤️ for zero-trust homelabs and small teams who need BeyondCorp-style security without the enterprise price tag.
-
 ---
 
-**Status**: 🚧 Early development - not production ready yet
-
-## Deployment Status
-
-**Current Status**: 🚧 In Development
-
-The project has core functionality implemented:
-- ✅ Agent (posture collection)
-- ✅ Server (policy evaluation) 
-- ✅ CLI (device management)
-- ✅ Tailscale enforcement hooks
-- ✅ Docker images defined
-
-### Building Locally
-
-```bash
-# Build binaries (requires Go 1.21+)
-make build
-
-# Build Docker images
-docker build -t vouch-server -f Dockerfile.server .
-docker build -t vouch-agent -f Dockerfile.agent .
-```
-
-### Quick Test
-
-```bash
-# Start server
-./bin/vouch-server --policy policies.example.yaml
-
-# In another terminal, start agent
-./bin/vouch-agent --server http://localhost:8080 --interval 1m
-
-# Check status
-./bin/vouch status
-./bin/vouch devices
-```
-
-**Note**: SQLite driver requires CGO. For cross-platform builds, use Docker.
+Built for zero-trust homelabs and small teams who need BeyondCorp-style security without the enterprise price tag.
