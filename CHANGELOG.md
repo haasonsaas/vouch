@@ -54,3 +54,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [Unreleased]: https://github.com/haasonsaas/vouch/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/haasonsaas/vouch/releases/tag/v0.1.0
+
+## [0.2.0] - Unreleased
+
+### Added
+- Production-ready CollectorV2 with:
+  - Context-based timeouts (no hanging probes)
+  - Parallel probe execution (8 probes complete in <2s)
+  - Proper JSON parsing for Tailscale status
+  - Cross-platform support (Linux, macOS, Windows)
+  - Partial failure reporting (probes can fail independently)
+  - Per-volume disk encryption detection
+  - Multiple distro support (apt/dnf/pacman/apk)
+  - Structured error reporting
+- Comprehensive test suite with timeout validation
+- PRETTY_NAME extraction from /etc/os-release (no full file dump)
+- Robust encryption detection (LUKS, FileVault, BitLocker)
+- systemctl JSON output parsing where available
+
+### Improved
+- Collector now surfaces errors per probe instead of failing entirely
+- Better distro detection for update timestamps
+- More accurate firewall detection across platforms
+
+[0.2.0]: https://github.com/haasonsaas/vouch/compare/v0.1.0...HEAD
