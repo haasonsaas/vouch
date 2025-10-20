@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -219,50 +220,19 @@ func (a *Agent) reportPosture() {
 }
 
 func (a *Agent) collectComprehensivePosture() map[string]interface{} {
-	report := make(map[string]interface{})
-
-	// Basic info
-	hostname, _ := os.Hostname()
-	report["hostname"] = hostname
+	// Use production-ready CollectorV2
+	collector := posture.NewCollectorV2(10 * time.Second)
+	ctx := context.Background()
+	
+	reportV2 := collector.Collect(ctx)
+	
+	// Convert to map for JSON marshaling
+	data, _ := json.Marshal(reportV2)
+	var report map[string]interface{}
+	json.Unmarshal(data, &report)
+	
+	// Add agent metadata
 	report["agent_version"] = Version
-	report["timestamp"] = time.Now()
-
-	// Tailscale
-	if a.config.Checks.Tailscale.Enable {
-		if ts, err := posture.CollectTailscalePosture(a.config.Checks.Tailscale.LocalAPISocket); err == nil {
-			report["tailscale"] = ts
-			report["node_id"] = ts.NodeID
-		}
-	}
-
-	// Firewall
-	if a.config.Checks.Firewall.Enable {
-		if fw, err := posture.CollectFirewallPosture(a.config.Checks.Firewall.LinuxPrefer); err == nil {
-			report["firewall"] = fw
-		}
-	}
-
-	// Updates
-	if a.config.Checks.Updates.Enable {
-		if upd, err := posture.CollectUpdatesPosture(); err == nil {
-			report["updates"] = upd
-		}
-	}
-
-	// Secure Boot / TPM
-	if a.config.Checks.SecureBoot.Enable {
-		if sb, err := posture.CollectSecureBootPosture(); err == nil {
-			report["secure_boot"] = sb
-		}
-	}
-
-	// Legacy basic posture (for backward compat)
-	if basic, err := posture.Collect(); err == nil {
-		report["os_release"] = basic.OSRelease
-		report["kernel"] = basic.Kernel
-		report["disk_encrypted"] = basic.DiskEncrypted
-		report["services"] = basic.Services
-	}
-
+	
 	return report
 }
