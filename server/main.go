@@ -1,22 +1,27 @@
 package main
 
 import (
-	"encoding/json"
-	"flag"
-	"fmt"
-	"fmt"
-	"log"
-	"net/http"
-	"os"
-	"time"
+    "crypto/ed25519"
+    "encoding/base64"
+    "encoding/json"
+    "errors"
+    "flag"
+    "fmt"
+    "log"
+    "net/http"
+    "os"
+    "strings"
+    "sync"
+    "time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/haasonsaas/vouch/pkg/enforcement"
-	"github.com/haasonsaas/vouch/pkg/policy"
-	"github.com/haasonsaas/vouch/pkg/posture"
-	"gopkg.in/yaml.v3"
-	"gorm.io/driver/sqlite"
-	"gorm.io/gorm"
+    "github.com/gin-gonic/gin"
+    "github.com/haasonsaas/vouch/pkg/auth"
+    "github.com/haasonsaas/vouch/pkg/enforcement"
+    "github.com/haasonsaas/vouch/pkg/policy"
+    "github.com/haasonsaas/vouch/pkg/posture"
+    "gopkg.in/yaml.v3"
+    "gorm.io/driver/sqlite"
+    "gorm.io/gorm"
 )
 
 var (
@@ -30,13 +35,22 @@ var (
 )
 
 type DeviceState struct {
-	ID         uint      `gorm:"primaryKey"`
-	Hostname   string    `gorm:"uniqueIndex"`
-	NodeID     string
-	Compliant  bool
-	LastSeen   time.Time
-	Violations string `gorm:"type:text"` // JSON array
-	PostureRaw string `gorm:"type:text"` // JSON
+    ID                uint       `gorm:"primaryKey"`
+    AgentID           string     `gorm:"uniqueIndex"`
+    Hostname          string     `gorm:"index"`
+    NodeID            string     `gorm:"index"`
+    PublicKey         []byte
+    Compliant         bool
+    LastSeen          time.Time
+    Violations        string     `gorm:"type:text"`
+    PostureRaw        string     `gorm:"type:text"`
+    ConsecutiveFail   int
+    ConsecutivePass   int
+    NonCompliantSince *time.Time
+    TagCompliant      bool
+    LastEnforcedAt    *time.Time
+    CreatedAt         time.Time
+    UpdatedAt         time.Time
 }
 
 type Server struct {
