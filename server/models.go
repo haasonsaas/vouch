@@ -2,17 +2,17 @@ package main
 
 import "time"
 
-// DeviceState captures the latest posture and identity details for an agent.
+// DeviceState captures posture, identity bindings, and enforcement status for an agent.
 type DeviceState struct {
-	ID                uint       `gorm:"primaryKey"`
-	AgentID           string     `gorm:"uniqueIndex"`
-	Hostname          string     `gorm:"index"`
-	NodeID            string     `gorm:"index"`
+	ID                uint   `gorm:"primaryKey"`
+	AgentID           string `gorm:"index"`
+	Hostname          string `gorm:"index"`
+	NodeID            string `gorm:"index"`
 	PublicKey         []byte
 	Compliant         bool
 	LastSeen          time.Time
-	Violations        string     `gorm:"type:text"`
-	PostureRaw        string     `gorm:"type:text"`
+	Violations        string `gorm:"type:text"`
+	PostureRaw        string `gorm:"type:text"`
 	ConsecutiveFail   int
 	ConsecutivePass   int
 	NonCompliantSince *time.Time
@@ -22,19 +22,19 @@ type DeviceState struct {
 	UpdatedAt         time.Time
 }
 
-// AgentNonce tracks recently seen nonces to reject replayed reports.
+// AgentNonce tracks recently seen nonces for replay detection.
 type AgentNonce struct {
 	ID      uint      `gorm:"primaryKey"`
-	AgentID string    `gorm:"index"`
-	Nonce   string    `gorm:"index"`
+	AgentID string    `gorm:"uniqueIndex:agent_nonce"`
+	Nonce   string    `gorm:"uniqueIndex:agent_nonce"`
 	SeenAt  time.Time `gorm:"index"`
 }
 
 // EnrollmentToken stores hashed, single-use enrollment tokens.
 type EnrollmentToken struct {
-	ID        uint       `gorm:"primaryKey"`
+	ID        uint `gorm:"primaryKey"`
 	Label     string
-	TokenHash string     `gorm:"uniqueIndex"`
+	TokenHash string `gorm:"uniqueIndex"`
 	ExpiresAt time.Time
 	UsedAt    *time.Time
 	CreatedAt time.Time
