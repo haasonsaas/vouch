@@ -1,0 +1,34 @@
+# Example systemd service for dev-desktop agent
+# Place in: /etc/systemd/system/vouch-agent.service
+
+[Unit]
+Description=Vouch Agent - Device Attestation Reporter
+After=network-online.target tailscaled.service
+Wants=network-online.target
+Requires=tailscaled.service
+
+[Service]
+Type=simple
+User=developer
+Group=developer
+Environment="SERVER_URL=http://vouch-server.example.com:8080"
+Environment="REPORT_INTERVAL=5m"
+ExecStart=/usr/local/bin/vouch-agent \
+    --server ${SERVER_URL} \
+    --interval ${REPORT_INTERVAL}
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target

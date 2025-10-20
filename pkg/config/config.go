@@ -1,0 +1,212 @@
+package config
+
+import (
+	"os"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+type AgentConfig struct {
+	Server    ServerConfig    `yaml:"server"`
+	Auth      AuthConfig      `yaml:"auth"`
+	Reporting ReportingConfig `yaml:"reporting"`
+	Checks    ChecksConfig    `yaml:"checks"`
+	Health    HealthConfig    `yaml:"health"`
+	Logging   LoggingConfig   `yaml:"logging"`
+	Updates   UpdatesConfig   `yaml:"updates"`
+}
+
+type ServerConfig struct {
+	URL             string `yaml:"url"`
+	EnrollToken     string `yaml:"enroll_token"`
+	RequestTimeout  int    `yaml:"request_timeout_s"`
+}
+
+type AuthConfig struct {
+	KeyPath           string `yaml:"key_path"`
+	AllowKeyRotation  bool   `yaml:"allow_key_rotation"`
+}
+
+type ReportingConfig struct {
+	Interval                  int  `yaml:"interval_s"`
+	Jitter                    int  `yaml:"jitter_s"`
+	IncludeListeningServices  bool `yaml:"include_listening_services"`
+	RedactHostnames           bool `yaml:"redact_hostnames"`
+}
+
+type ChecksConfig struct {
+	Tailscale      TailscaleCheck      `yaml:"tailscale"`
+	Firewall       FirewallCheck       `yaml:"firewall"`
+	Updates        UpdatesCheck        `yaml:"updates"`
+	DiskEncryption DiskEncryptionCheck `yaml:"disk_encryption"`
+	SecureBoot     SecureBootCheck     `yaml:"secure_boot_tpm"`
+	AntiMalware    AntiMalwareCheck    `yaml:"antimalware"`
+	Hardening      HardeningCheck      `yaml:"hardening"`
+}
+
+type TailscaleCheck struct {
+	Enable        bool   `yaml:"enable"`
+	LocalAPISocket string `yaml:"localapi_socket"`
+}
+
+type FirewallCheck struct {
+	Enable       bool   `yaml:"enable"`
+	LinuxPrefer  string `yaml:"linux_prefer"`
+}
+
+type UpdatesCheck struct {
+	Enable             bool `yaml:"enable"`
+	MaxDaysSinceUpdate int  `yaml:"max_days_since_update"`
+}
+
+type DiskEncryptionCheck struct {
+	Enable            bool `yaml:"enable"`
+	RequireRootVolume bool `yaml:"require_root_volume"`
+}
+
+type SecureBootCheck struct {
+	Enable bool `yaml:"enable"`
+}
+
+type AntiMalwareCheck struct {
+	Enable              bool `yaml:"enable"`
+	MinSigRecencyDays   int  `yaml:"min_sig_recency_days"`
+}
+
+type HardeningCheck struct {
+	SELinuxAppArmorEnforcing   bool `yaml:"selinux_apparmor_enforcing"`
+	SSHPasswordAuthDisabled    bool `yaml:"ssh_password_auth_disabled"`
+}
+
+type HealthConfig struct {
+	TimeDriftMaxS       int    `yaml:"time_drift_max_s"`
+	TailscalePingTarget string `yaml:"tailscale_ping_target"`
+}
+
+type LoggingConfig struct {
+	Level string `yaml:"level"`
+	JSON  bool   `yaml:"json"`
+}
+
+type UpdatesConfig struct {
+	SelfUpdate      bool   `yaml:"self_update"`
+	Channel         string `yaml:"channel"`
+	UpdateURL       string `yaml:"update_url"`
+	VerifySignature bool   `yaml:"verify_signature"`
+}
+
+// DefaultConfig returns a config with sensible defaults
+func DefaultConfig() *AgentConfig {
+	return &AgentConfig{
+		Server: ServerConfig{
+			URL:            "http://localhost:8080",
+			RequestTimeout: 10,
+		},
+		Auth: AuthConfig{
+			KeyPath:          "/var/lib/vouch/agent_key",
+			AllowKeyRotation: true,
+		},
+		Reporting: ReportingConfig{
+			Interval:                 300,
+			Jitter:                   30,
+			IncludeListeningServices: false,
+			RedactHostnames:          false,
+		},
+		Checks: ChecksConfig{
+			Tailscale: TailscaleCheck{
+				Enable:         true,
+				LocalAPISocket: "/var/run/tailscale/tailscaled.sock",
+			},
+			Firewall: FirewallCheck{
+				Enable:      true,
+				LinuxPrefer: "auto",
+			},
+			Updates: UpdatesCheck{
+				Enable:             true,
+				MaxDaysSinceUpdate: 30,
+			},
+			DiskEncryption: DiskEncryptionCheck{
+				Enable:            true,
+				RequireRootVolume: true,
+			},
+			SecureBoot: SecureBootCheck{
+				Enable: true,
+			},
+			AntiMalware: AntiMalwareCheck{
+				Enable:            true,
+				MinSigRecencyDays: 7,
+			},
+			Hardening: HardeningCheck{
+				SELinuxAppArmorEnforcing: false,
+				SSHPasswordAuthDisabled:  false,
+			},
+		},
+		Health: HealthConfig{
+			TimeDriftMaxS: 120,
+		},
+		Logging: LoggingConfig{
+			Level: "info",
+			JSON:  false,
+		},
+		Updates: UpdatesConfig{
+			SelfUpdate:      false,
+			Channel:         "stable",
+			VerifySignature: true,
+		},
+	}
+}
+
+// Load reads config from file with env var and CLI overrides
+func Load(path string) (*AgentConfig, error) {
+	cfg := DefaultConfig()
+
+	// Load from file if exists
+	if path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		if err == nil {
+			if err := yaml.Unmarshal(data, cfg); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Override with env vars
+	if url := os.Getenv("VOUCH_SERVER_URL"); url != "" {
+		cfg.Server.URL = url
+	}
+	if token := os.Getenv("VOUCH_ENROLL_TOKEN"); token != "" {
+		cfg.Server.EnrollToken = token
+	}
+	if level := os.Getenv("VOUCH_LOG_LEVEL"); level != "" {
+		cfg.Logging.Level = level
+	}
+
+	return cfg, nil
+}
+
+func (c *AgentConfig) Validate() error {
+	if c.Server.URL == "" {
+		return ErrMissingServerURL
+	}
+	if c.Reporting.Interval < 10 {
+		return ErrInvalidInterval
+	}
+	return nil
+}
+
+var (
+	ErrMissingServerURL = &ConfigError{"server URL is required"}
+	ErrInvalidInterval  = &ConfigError{"reporting interval must be >= 10s"}
+)
+
+type ConfigError struct {
+	Message string
+}
+
+func (e *ConfigError) Error() string {
+	return e.Message
+}
