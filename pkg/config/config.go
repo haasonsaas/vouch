@@ -15,6 +15,7 @@ type AgentConfig struct {
 	Health    HealthConfig    `yaml:"health"`
 	Logging   LoggingConfig   `yaml:"logging"`
 	Updates   UpdatesConfig   `yaml:"updates"`
+	Tracing   TracingConfig   `yaml:"tracing"`
 }
 
 type ServerConfig struct {
@@ -22,6 +23,9 @@ type ServerConfig struct {
 	EnrollToken     string `yaml:"enroll_token"`
 	RequestTimeout  int    `yaml:"request_timeout_s"`
 	MetricsEndpoint string `yaml:"metrics_endpoint"`
+	RetryInitialMs  int    `yaml:"retry_initial_ms"`
+	RetryMaxMs      int    `yaml:"retry_max_ms"`
+	RetryMaxRetries int    `yaml:"retry_max_attempts"`
 }
 
 type AuthConfig struct {
@@ -98,6 +102,12 @@ type UpdatesConfig struct {
 	VerifySignature bool   `yaml:"verify_signature"`
 }
 
+type TracingConfig struct {
+	Endpoint    string  `yaml:"endpoint" json:"endpoint"`
+	Insecure    bool    `yaml:"insecure" json:"insecure"`
+	SampleRatio float64 `yaml:"sample_ratio" json:"sample_ratio"`
+}
+
 // DefaultConfig returns a config with sensible defaults
 func DefaultConfig() *AgentConfig {
 	return &AgentConfig{
@@ -105,6 +115,9 @@ func DefaultConfig() *AgentConfig {
 			URL:             "https://localhost:8443",
 			RequestTimeout:  10,
 			MetricsEndpoint: "",
+			RetryInitialMs:  500,
+			RetryMaxMs:      5000,
+			RetryMaxRetries: 5,
 		},
 		Auth: AuthConfig{
 			KeyPath:          "/var/lib/vouch/agent_key",
@@ -158,6 +171,11 @@ func DefaultConfig() *AgentConfig {
 			Channel:         "stable",
 			VerifySignature: true,
 		},
+		Tracing: TracingConfig{
+			Endpoint:    "",
+			Insecure:    false,
+			SampleRatio: 1,
+		},
 	}
 }
 
@@ -204,6 +222,21 @@ func (c *AgentConfig) Validate() error {
 	}
 	if c.Server.RequestTimeout <= 0 {
 		c.Server.RequestTimeout = 10
+	}
+	if c.Server.RetryInitialMs <= 0 {
+		c.Server.RetryInitialMs = 500
+	}
+	if c.Server.RetryMaxMs <= 0 {
+		c.Server.RetryMaxMs = 5000
+	}
+	if c.Server.RetryMaxRetries < 0 {
+		c.Server.RetryMaxRetries = 5
+	}
+	if c.Server.RetryMaxMs < c.Server.RetryInitialMs {
+		c.Server.RetryMaxMs = c.Server.RetryInitialMs
+	}
+	if c.Tracing.SampleRatio <= 0 || c.Tracing.SampleRatio > 1 {
+		c.Tracing.SampleRatio = 1
 	}
 	return nil
 }

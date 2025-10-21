@@ -9,18 +9,18 @@ import (
 )
 
 type Identity struct {
-	AgentID    string         `json:"agent_id"`
-	NodeID     string         `json:"node_id"`
+	AgentID    string             `json:"agent_id"`
+	NodeID     string             `json:"node_id"`
 	PublicKey  ed25519.PublicKey  `json:"-"`
 	PrivateKey ed25519.PrivateKey `json:"-"`
 }
 
 type EnrollmentRequest struct {
-	Token         string `json:"token"`
-	NodeID        string `json:"node_id"`
-	Hostname      string `json:"hostname"`
-	PublicKeyB64  string `json:"public_key"`
-	OSInfo        string `json:"os_info"`
+	Token        string `json:"token"`
+	NodeID       string `json:"node_id"`
+	Hostname     string `json:"hostname"`
+	PublicKeyB64 string `json:"public_key"`
+	OSInfo       string `json:"os_info"`
 }
 
 type EnrollmentResponse struct {
@@ -28,6 +28,7 @@ type EnrollmentResponse struct {
 	ServerVersion string `json:"server_version"`
 	MinVersion    string `json:"min_version"`
 	PolicyETag    string `json:"policy_etag"`
+	RequestID     string `json:"request_id"`
 }
 
 // GenerateIdentity creates a new Ed25519 keypair

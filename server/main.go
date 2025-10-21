@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -21,6 +22,7 @@ import (
 	"github.com/haasonsaas/vouch/pkg/enforcement"
 	"github.com/haasonsaas/vouch/pkg/policy"
 	"github.com/haasonsaas/vouch/pkg/posture"
+	"github.com/haasonsaas/vouch/pkg/telemetry"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"gopkg.in/yaml.v3"
@@ -66,6 +68,35 @@ func main() {
 
 	configureLogger()
 	log.Info().Str("version", Version).Msg("Vouch Server starting")
+
+	ctx := context.Background()
+	traceEndpoint := os.Getenv("VOUCH_TRACE_ENDPOINT")
+	traceInsecure := false
+	if raw := os.Getenv("VOUCH_TRACE_INSECURE"); raw != "" {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			traceInsecure = parsed
+		} else {
+			log.Warn().Str("value", raw).Msg("Invalid VOUCH_TRACE_INSECURE, defaulting to false")
+		}
+	}
+	sampleRatio := 1.0
+	if raw := os.Getenv("VOUCH_TRACE_SAMPLE_RATIO"); raw != "" {
+		if parsed, err := strconv.ParseFloat(raw, 64); err == nil && parsed > 0 && parsed <= 1 {
+			sampleRatio = parsed
+		} else {
+			log.Warn().Str("value", raw).Msg("Invalid VOUCH_TRACE_SAMPLE_RATIO, defaulting to 1")
+		}
+	}
+
+	if tp, err := telemetry.SetupTracing(ctx, "vouch-server", Version, traceEndpoint, traceInsecure, sampleRatio); err != nil {
+		log.Warn().Err(err).Msg("Tracing disabled")
+	} else if tp != nil {
+		defer func() {
+			if err := tp.Shutdown(ctx); err != nil {
+				log.Warn().Err(err).Msg("Failed to shutdown tracer provider")
+			}
+		}()
+	}
 
 	// Open database
 	db, err := gorm.Open(sqlite.Open(*dbPath), &gorm.Config{})
@@ -132,6 +163,7 @@ func main() {
 
 	// Setup HTTP routes
 	r := gin.Default()
+	r.Use(withRequestContext(srv.logger))
 	srv.registerEnrollmentRoutes(r)
 	r.POST("/v1/report", srv.rateLimited("report", 120, time.Minute, func(c *gin.Context) string {
 		return c.GetHeader("X-Vouch-Agent-ID")
@@ -158,9 +190,19 @@ func main() {
 
 func (s *Server) handleReport(c *gin.Context) {
 	metricReportRequests.Add(1)
+	logger := requestLogger(c, s.logger)
+
 	report, device, err := s.authenticateReport(c)
 	if err != nil {
 		metricReportFailures.Add(1)
+		switch {
+		case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+			respondError(c, http.StatusBadRequest, "failed to read body", s.logger)
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			respondError(c, http.StatusUnauthorized, "agent not enrolled", s.logger)
+		default:
+			respondError(c, http.StatusUnauthorized, err.Error(), s.logger)
+		}
 		return
 	}
 
@@ -175,25 +217,25 @@ func (s *Server) handleReport(c *gin.Context) {
 
 	if err := s.db.Save(device).Error; err != nil {
 		metricReportFailures.Add(1)
-		s.logger.Error().Err(err).Str("agent_id", device.AgentID).Msg("Failed to persist device state")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist device"})
+		logger.Error().Err(err).Str("agent_id", device.AgentID).Msg("Failed to persist device state")
+		respondError(c, http.StatusInternalServerError, "failed to persist device", s.logger)
 		return
 	}
 
-	s.logger.Info().Str("agent_id", device.AgentID).Bool("compliant", eval.Compliant).Msg("Processed report")
+	logger.Info().Str("agent_id", device.AgentID).Bool("compliant", eval.Compliant).Msg("Processed report")
 
 	if s.enforcer != nil && report.NodeID != "unknown" {
 		if eval.Compliant {
 			if err := s.enforcer.GrantAccess(report.NodeID); err != nil {
-				s.logger.Error().Err(err).Str("hostname", report.Hostname).Msg("Failed to grant enforcement access")
+				logger.Error().Err(err).Str("hostname", report.Hostname).Msg("Failed to grant enforcement access")
 			} else {
-				s.logger.Info().Str("hostname", report.Hostname).Msg("Granted access")
+				logger.Info().Str("hostname", report.Hostname).Msg("Granted access")
 			}
 		} else {
 			if err := s.enforcer.RevokeAccess(report.NodeID); err != nil {
-				s.logger.Error().Err(err).Str("hostname", report.Hostname).Msg("Failed to revoke enforcement access")
+				logger.Error().Err(err).Str("hostname", report.Hostname).Msg("Failed to revoke enforcement access")
 			} else {
-				s.logger.Warn().Str("hostname", report.Hostname).Msg("Revoked access")
+				logger.Warn().Str("hostname", report.Hostname).Msg("Revoked access")
 			}
 		}
 	}
@@ -202,6 +244,7 @@ func (s *Server) handleReport(c *gin.Context) {
 		"status":     "ok",
 		"compliant":  eval.Compliant,
 		"violations": eval.Violations,
+		"request_id": requestID(c),
 	})
 }
 
@@ -213,7 +256,7 @@ func (s *Server) rateLimited(bucket string, limit int, window time.Duration, key
 		}
 		if !s.rateLimiter.Allow(bucket, key, limit, window) {
 			c.Header("Retry-After", strconv.Itoa(int(window.Seconds())))
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+			respondError(c, http.StatusTooManyRequests, "rate limit exceeded", s.logger)
 			return
 		}
 		next(c)
@@ -228,46 +271,35 @@ func (s *Server) authenticateReport(c *gin.Context) (posture.Report, *DeviceStat
 	nonce := c.GetHeader("X-Vouch-Nonce")
 
 	if agentID == "" || signature == "" || timestamp == "" || nonce == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authentication headers"})
-		return empty, nil, errors.New("missing headers")
+		return empty, nil, errors.New("missing authentication headers")
 	}
 
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to read body"})
 		return empty, nil, err
 	}
 	// reset body for downstream readers
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 	var report posture.Report
 	if err := json.Unmarshal(bodyBytes, &report); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return empty, nil, err
 	}
 
 	var device DeviceState
 	if err := s.db.Where("agent_id = ?", agentID).First(&device).Error; err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "agent not enrolled"})
-		} else {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load device"})
-		}
 		return empty, nil, err
 	}
 
 	if report.NodeID == "" || !strings.EqualFold(report.NodeID, device.NodeID) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "node mismatch"})
 		return empty, nil, errors.New("node mismatch")
 	}
 
 	if len(device.PublicKey) != ed25519.PublicKeySize {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing public key"})
 		return empty, nil, errors.New("missing public key")
 	}
 
 	ts, err := time.Parse(time.RFC3339, timestamp)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid timestamp"})
 		return empty, nil, err
 	}
 
@@ -279,12 +311,10 @@ func (s *Server) authenticateReport(c *gin.Context) (posture.Report, *DeviceStat
 	}
 
 	if err := auth.VerifySignedRequest(device.PublicKey, signed, 5*time.Minute); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return empty, nil, err
 	}
 
 	if err := s.nonceStore.CheckAndStore(agentID, nonce, ts); err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
 		return empty, nil, err
 	}
 

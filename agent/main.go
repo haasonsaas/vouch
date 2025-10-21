@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,8 +21,12 @@ import (
 	"github.com/haasonsaas/vouch/pkg/config"
 	"github.com/haasonsaas/vouch/pkg/health"
 	"github.com/haasonsaas/vouch/pkg/posture"
+	"github.com/haasonsaas/vouch/pkg/telemetry"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
 )
 
 var (
@@ -37,6 +42,7 @@ type Agent struct {
 	identity *auth.Identity
 	client   *http.Client
 	keyPath  string
+	retrier  *retrier
 }
 
 func main() {
@@ -68,12 +74,39 @@ func main() {
 
 	applyAgentLogging(cfg.Logging)
 
+	ctx := context.Background()
+	traceEndpoint := os.Getenv("VOUCH_AGENT_TRACE_ENDPOINT")
+	if traceEndpoint == "" {
+		traceEndpoint = cfg.Tracing.Endpoint
+	}
+	traceInsecure := cfg.Tracing.Insecure
+	if raw := os.Getenv("VOUCH_AGENT_TRACE_INSECURE"); raw != "" {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			traceInsecure = parsed
+		}
+	}
+	traceRatio := cfg.Tracing.SampleRatio
+	if raw := os.Getenv("VOUCH_AGENT_TRACE_SAMPLE_RATIO"); raw != "" {
+		if parsed, err := strconv.ParseFloat(raw, 64); err == nil && parsed > 0 && parsed <= 1 {
+			traceRatio = parsed
+		}
+	}
+
+	if tp, err := telemetry.SetupTracing(ctx, "vouch-agent", Version, traceEndpoint, traceInsecure, traceRatio); err != nil {
+		log.Warn().Err(err).Msg("Agent tracing disabled")
+	} else if tp != nil {
+		defer func() {
+			if err := tp.Shutdown(ctx); err != nil {
+				log.Warn().Err(err).Msg("Failed to shutdown agent tracer")
+			}
+		}()
+	}
+
 	agent := &Agent{
-		config: cfg,
-		client: &http.Client{
-			Timeout: time.Duration(cfg.Server.RequestTimeout) * time.Second,
-		},
+		config:  cfg,
+		client:  &http.Client{Timeout: time.Duration(cfg.Server.RequestTimeout) * time.Second},
 		keyPath: cfg.Auth.KeyPath,
+		retrier: newRetrier(cfg.Server.RetryInitialMs, cfg.Server.RetryMaxMs, cfg.Server.RetryMaxRetries),
 	}
 
 	// Load or enroll identity
@@ -173,17 +206,21 @@ func (a *Agent) loadOrEnroll() error {
 }
 
 func (a *Agent) enroll() error {
-	// Generate new keypair
+	ctx, span := otel.Tracer("github.com/haasonsaas/vouch/agent").Start(context.Background(), "agent.enroll")
+	defer span.End()
+
 	identity, err := auth.GenerateIdentity()
 	if err != nil {
+		span.RecordError(err)
 		return err
 	}
 
-	// Get Tailscale node ID
 	tsPosture, _ := posture.CollectTailscalePosture(a.config.Checks.Tailscale.LocalAPISocket)
 	nodeID := tsPosture.NodeID
 	if nodeID == "" || nodeID == "unknown" {
-		return fmt.Errorf("could not determine Tailscale node ID")
+		err := fmt.Errorf("could not determine Tailscale node ID")
+		span.RecordError(err)
+		return err
 	}
 
 	hostname, _ := os.Hostname()
@@ -197,14 +234,30 @@ func (a *Agent) enroll() error {
 	}
 
 	data, _ := json.Marshal(enrollReq)
-	resp, err := a.client.Post(a.config.Server.URL+"/v1/enroll", "application/json", bytes.NewBuffer(data))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.config.Server.URL+"/v1/enroll", bytes.NewBuffer(data))
 	if err != nil {
+		span.RecordError(err)
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	propagator := otel.GetTextMapPropagator()
+	propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
+	span.SetAttributes(attribute.String("vouch.node_id", nodeID))
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		span.RecordError(err)
 		return err
 	}
 	defer resp.Body.Close()
 
+	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("enrollment failed: status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		err := fmt.Errorf("enrollment failed: status %d", resp.StatusCode)
+		span.RecordError(err)
+		span.SetAttributes(attribute.String("http.response.body", strings.TrimSpace(string(body))))
+		return err
 	}
 
 	var enrollResp auth.EnrollmentResponse
@@ -233,30 +286,51 @@ func (a *Agent) enroll() error {
 }
 
 func (a *Agent) reportPosture() {
-	// Collect comprehensive posture
-	report := a.collectComprehensivePosture()
+	ctx, span := otel.Tracer("github.com/haasonsaas/vouch/agent").Start(context.Background(), "agent.report")
+	defer span.End()
 
-	// Sign the report
+	report := a.collectComprehensivePosture()
 	data, _ := json.Marshal(report)
 	signedReq := auth.CreateSignedRequest(a.identity, data)
 
-	// Send signed request
 	req, _ := http.NewRequest("POST", a.config.Server.URL+"/v1/report", bytes.NewBuffer(signedReq.Body))
+	req = req.WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Vouch-Agent-ID", a.identity.AgentID)
 	req.Header.Set("X-Vouch-Signature", signedReq.Signature)
 	req.Header.Set("X-Vouch-Timestamp", signedReq.Timestamp.Format(time.RFC3339))
 	req.Header.Set("X-Vouch-Nonce", signedReq.Nonce)
+	propagator := otel.GetTextMapPropagator()
+	propagator.Inject(ctx, propagation.HeaderCarrier(req.Header))
 
-	resp, err := a.client.Do(req)
-	if err != nil {
+	span.SetAttributes(attribute.String("agent.id", a.identity.AgentID))
+
+	var resp *http.Response
+	operation := func() error {
+		var err error
+		resp, err = a.client.Do(req)
+		if err != nil {
+			return err
+		}
+		if isRetryableStatus(resp) {
+			return retryableStatusError{status: resp.StatusCode}
+		}
+		return nil
+	}
+	if err := a.retrier.do(operation, isRetryableHTTP); err != nil {
+		span.RecordError(err)
 		log.Error().Err(err).Msg("Failed sending report")
 		return
 	}
 	defer resp.Body.Close()
 
+	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
 	if resp.StatusCode != http.StatusOK {
-		log.Error().Int("status", resp.StatusCode).Msg("Server returned non-OK status")
+		data, _ := io.ReadAll(resp.Body)
+		err := fmt.Errorf("report failed: %d", resp.StatusCode)
+		span.RecordError(err)
+		span.SetAttributes(attribute.String("http.response.body", strings.TrimSpace(string(data))))
+		log.Error().Int("status", resp.StatusCode).Bytes("body", data).Msg("Server returned non-OK status")
 		return
 	}
 
@@ -265,13 +339,23 @@ func (a *Agent) reportPosture() {
 		Compliant  bool     `json:"compliant"`
 		Violations []string `json:"violations"`
 		MinVersion string   `json:"min_version,omitempty"`
+		RequestID  string   `json:"request_id"`
 	}
-	json.NewDecoder(resp.Body).Decode(&response)
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		span.RecordError(err)
+		log.Error().Err(err).Msg("Failed decoding report response")
+		return
+	}
+
+	span.SetAttributes(attribute.Bool("agent.compliant", response.Compliant))
+	if response.RequestID != "" {
+		span.SetAttributes(attribute.String("request_id", response.RequestID))
+	}
 
 	if response.Compliant {
-		log.Info().Msg("Posture report accepted")
+		log.Info().Str("request_id", response.RequestID).Msg("Posture report accepted")
 	} else {
-		log.Warn().Interface("violations", response.Violations).Msg("Non-compliant posture")
+		log.Warn().Str("request_id", response.RequestID).Interface("violations", response.Violations).Msg("Non-compliant posture")
 	}
 
 	// Check version
@@ -354,8 +438,19 @@ func (a *Agent) requestRotationChallenge() (*rotationChallenge, error) {
 		return nil, err
 	}
 
-	resp, err := a.client.Do(req)
-	if err != nil {
+	var resp *http.Response
+	operation := func() error {
+		var err error
+		resp, err = a.client.Do(req)
+		if err != nil {
+			return err
+		}
+		if isRetryableStatus(resp) {
+			return retryableStatusError{status: resp.StatusCode}
+		}
+		return nil
+	}
+	if err := a.retrier.do(operation, isRetryableHTTP); err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -386,8 +481,19 @@ func (a *Agent) submitRotation(body []byte) error {
 		return err
 	}
 
-	resp, err := a.client.Do(req)
-	if err != nil {
+	var resp *http.Response
+	operation := func() error {
+		var err error
+		resp, err = a.client.Do(req)
+		if err != nil {
+			return err
+		}
+		if isRetryableStatus(resp) {
+			return retryableStatusError{status: resp.StatusCode}
+		}
+		return nil
+	}
+	if err := a.retrier.do(operation, isRetryableHTTP); err != nil {
 		return err
 	}
 	defer resp.Body.Close()

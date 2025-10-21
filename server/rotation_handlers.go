@@ -92,12 +92,13 @@ func (s *Server) requireAuthenticatedAgent(c *gin.Context) {
 func (s *Server) issueRotationChallenge(c *gin.Context) {
 	metricRotationRequests.Add(1)
 	device := c.MustGet("device").(*DeviceState)
+	logger := requestLogger(c, s.logger)
 	now := time.Now().UTC()
 	force := c.Query("force") == "true"
 
 	if !device.RequiresRotation && !force {
 		if err := s.db.Where("agent_id = ?", device.AgentID).Delete(&RotationChallenge{}).Error; err != nil {
-			s.logger.Error().Err(err).Str("agent_id", device.AgentID).Msg("Failed clearing stale rotation challenge")
+			logger.Error().Err(err).Str("agent_id", device.AgentID).Msg("Failed clearing stale rotation challenge")
 		}
 		c.Status(http.StatusNoContent)
 		return
@@ -107,7 +108,7 @@ func (s *Server) issueRotationChallenge(c *gin.Context) {
 	if err := s.db.Where("agent_id = ?", device.AgentID).First(&challenge).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
 			metricRotationFailures.Add(1)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load challenge"})
+			respondError(c, http.StatusInternalServerError, "failed to load challenge", s.logger)
 			return
 		}
 	} else if now.Before(challenge.ExpiresAt) {
@@ -136,21 +137,23 @@ func (s *Server) issueRotationChallenge(c *gin.Context) {
 		DoUpdates: clause.AssignmentColumns([]string{"nonce", "issued_at", "expires_at"}),
 	}).Create(&challenge).Error; err != nil {
 		metricRotationFailures.Add(1)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist challenge"})
+		respondError(c, http.StatusInternalServerError, "failed to persist challenge", s.logger)
 		return
 	}
 
-	s.logger.Info().Str("agent_id", device.AgentID).Msg("Issued rotation challenge")
+	logger.Info().Str("agent_id", device.AgentID).Msg("Issued rotation challenge")
 
 	c.JSON(http.StatusOK, gin.H{
 		"challenge":  challenge.Nonce,
 		"expires_at": challenge.ExpiresAt,
+		"request_id": requestID(c),
 	})
 }
 
 func (s *Server) completeRotation(c *gin.Context) {
 	metricRotationRequests.Add(1)
 	device := c.MustGet("device").(*DeviceState)
+	logger := requestLogger(c, s.logger)
 
 	var req struct {
 		Challenge string `json:"challenge"`
@@ -160,13 +163,13 @@ func (s *Server) completeRotation(c *gin.Context) {
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		metricRotationFailures.Add(1)
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		respondError(c, http.StatusBadRequest, err.Error(), s.logger)
 		return
 	}
 
 	if req.Challenge == "" || req.PublicKey == "" || req.Signature == "" {
 		metricRotationFailures.Add(1)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing fields"})
+		respondError(c, http.StatusBadRequest, "missing fields", s.logger)
 		return
 	}
 
@@ -174,10 +177,10 @@ func (s *Server) completeRotation(c *gin.Context) {
 	if err := s.db.Where("agent_id = ?", device.AgentID).First(&challenge).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			metricRotationFailures.Add(1)
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "no pending challenge"})
+			respondError(c, http.StatusUnauthorized, "no pending challenge", s.logger)
 		} else {
 			metricRotationFailures.Add(1)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load challenge"})
+			respondError(c, http.StatusInternalServerError, "failed to load challenge", s.logger)
 		}
 		return
 	}
@@ -185,33 +188,33 @@ func (s *Server) completeRotation(c *gin.Context) {
 	if time.Now().UTC().After(challenge.ExpiresAt) {
 		s.db.Where("agent_id = ?", device.AgentID).Delete(&RotationChallenge{})
 		metricRotationFailures.Add(1)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "challenge expired"})
+		respondError(c, http.StatusUnauthorized, "challenge expired", s.logger)
 		return
 	}
 
 	if subtle.ConstantTimeCompare([]byte(challenge.Nonce), []byte(req.Challenge)) != 1 {
 		metricRotationFailures.Add(1)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "challenge mismatch"})
+		respondError(c, http.StatusUnauthorized, "challenge mismatch", s.logger)
 		return
 	}
 
 	newKeyBytes, err := base64.StdEncoding.DecodeString(req.PublicKey)
 	if err != nil || len(newKeyBytes) != ed25519.PublicKeySize {
 		metricRotationFailures.Add(1)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid public key"})
+		respondError(c, http.StatusBadRequest, "invalid public key", s.logger)
 		return
 	}
 
 	sigBytes, err := base64.StdEncoding.DecodeString(req.Signature)
 	if err != nil {
 		metricRotationFailures.Add(1)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid signature encoding"})
+		respondError(c, http.StatusBadRequest, "invalid signature encoding", s.logger)
 		return
 	}
 
 	if !ed25519.Verify(ed25519.PublicKey(newKeyBytes), []byte(challenge.Nonce), sigBytes) {
 		metricRotationFailures.Add(1)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "challenge signature invalid"})
+		respondError(c, http.StatusUnauthorized, "challenge signature invalid", s.logger)
 		return
 	}
 
@@ -232,14 +235,14 @@ func (s *Server) completeRotation(c *gin.Context) {
 		}
 		return nil
 	}); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to rotate key"})
+		respondError(c, http.StatusInternalServerError, "failed to rotate key", s.logger)
 		return
 	}
 
 	device.PublicKey = append([]byte(nil), newKeyBytes...)
 	device.RequiresRotation = false
-	s.logger.Info().Str("agent_id", device.AgentID).Msg("Rotated agent key")
-	c.JSON(http.StatusOK, gin.H{"status": "rotated"})
+	logger.Info().Str("agent_id", device.AgentID).Msg("Rotated agent key")
+	c.JSON(http.StatusOK, gin.H{"status": "rotated", "request_id": requestID(c)})
 }
 
 func (s *Server) loadDevice(agentID string) (*DeviceState, error) {
@@ -262,9 +265,10 @@ func generateRotationNonce() (string, error) {
 }
 
 func (s *Server) markRotationRequired(c *gin.Context) {
+	logger := requestLogger(c, s.logger)
 	agentID := c.Param("agent_id")
 	if agentID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing agent id"})
+		respondError(c, http.StatusBadRequest, "missing agent id", logger)
 		return
 	}
 
@@ -274,25 +278,27 @@ func (s *Server) markRotationRequired(c *gin.Context) {
 			"requires_rotation": true,
 		})
 	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to flag rotation"})
+		logger.Error().Err(result.Error).Str("agent_id", agentID).Msg("Failed to flag rotation")
+		respondError(c, http.StatusInternalServerError, "failed to flag rotation", logger)
 		return
 	}
 	if result.RowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+		respondError(c, http.StatusNotFound, "agent not found", logger)
 		return
 	}
 
 	if err := s.db.Where("agent_id = ?", agentID).Delete(&RotationChallenge{}).Error; err != nil {
-		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("Failed clearing prior rotation challenge")
+		logger.Warn().Err(err).Str("agent_id", agentID).Msg("Failed clearing prior rotation challenge")
 	}
 
 	c.Status(http.StatusNoContent)
 }
 
 func (s *Server) clearRotationRequirement(c *gin.Context) {
+	logger := requestLogger(c, s.logger)
 	agentID := c.Param("agent_id")
 	if agentID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "missing agent id"})
+		respondError(c, http.StatusBadRequest, "missing agent id", logger)
 		return
 	}
 
@@ -302,16 +308,17 @@ func (s *Server) clearRotationRequirement(c *gin.Context) {
 			"requires_rotation": false,
 		})
 	if result.Error != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to clear rotation"})
+		logger.Error().Err(result.Error).Str("agent_id", agentID).Msg("Failed to clear rotation requirement")
+		respondError(c, http.StatusInternalServerError, "failed to clear rotation", logger)
 		return
 	}
 	if result.RowsAffected == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+		respondError(c, http.StatusNotFound, "agent not found", logger)
 		return
 	}
 
 	if err := s.db.Where("agent_id = ?", agentID).Delete(&RotationChallenge{}).Error; err != nil {
-		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("Failed clearing rotation challenge")
+		logger.Warn().Err(err).Str("agent_id", agentID).Msg("Failed clearing rotation challenge")
 	}
 
 	c.Status(http.StatusNoContent)
