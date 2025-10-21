@@ -6,9 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"expvar"
 	"flag"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -21,6 +21,8 @@ import (
 	"github.com/haasonsaas/vouch/pkg/enforcement"
 	"github.com/haasonsaas/vouch/pkg/policy"
 	"github.com/haasonsaas/vouch/pkg/posture"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 	"gopkg.in/yaml.v3"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -36,6 +38,13 @@ var (
 	enrollTokenSalt   = flag.String("enroll-token-salt", "", "Hex-encoded secret used to hash enrollment tokens (or set VOUCH_ENROLL_SALT)")
 	enrollAdminToken  = flag.String("enroll-admin-token", "", "Bearer token required to manage enrollment tokens (or set VOUCH_ENROLL_ADMIN_TOKEN)")
 	Version           = "dev"
+
+	metricEnrollRequests   = expvar.NewInt("enroll_requests_total")
+	metricEnrollFailures   = expvar.NewInt("enroll_failures_total")
+	metricReportRequests   = expvar.NewInt("report_requests_total")
+	metricReportFailures   = expvar.NewInt("report_failures_total")
+	metricRotationRequests = expvar.NewInt("rotation_requests_total")
+	metricRotationFailures = expvar.NewInt("rotation_failures_total")
 )
 
 type Server struct {
@@ -49,22 +58,24 @@ type Server struct {
 	nonceStore       *NonceStore
 	rateLimiter      *RateLimiter
 	rotationMu       sync.Mutex
+	logger           zerolog.Logger
 }
 
 func main() {
 	flag.Parse()
 
-	log.Printf("Vouch Server %s starting...", Version)
+	configureLogger()
+	log.Info().Str("version", Version).Msg("Vouch Server starting")
 
 	// Open database
 	db, err := gorm.Open(sqlite.Open(*dbPath), &gorm.Config{})
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		log.Fatal().Err(err).Msg("Failed to connect to database")
 	}
 
 	// Migrate schema
-	if err := db.AutoMigrate(&DeviceState{}, &EnrollmentToken{}, &RotationChallenge{}); err != nil {
-		log.Fatalf("Failed to migrate database schema: %v", err)
+	if err := db.AutoMigrate(&DeviceState{}, &EnrollmentToken{}, &RotationChallenge{}, &AgentNonce{}); err != nil {
+		log.Fatal().Err(err).Msg("Failed to migrate database schema")
 	}
 
 	// Load policy
@@ -73,27 +84,27 @@ func main() {
 	salt := os.Getenv("VOUCH_ENROLL_SALT")
 	if *enrollTokenSalt != "" {
 		if salt != "" {
-			log.Printf("Warning: --enroll-token-salt overrides VOUCH_ENROLL_SALT")
+			log.Warn().Msg("--enroll-token-salt overrides VOUCH_ENROLL_SALT")
 		}
 		salt = *enrollTokenSalt
 	}
 	if salt == "" {
-		log.Fatal("Missing enrollment token salt (set --enroll-token-salt or VOUCH_ENROLL_SALT)")
+		log.Fatal().Msg("Missing enrollment token salt (set --enroll-token-salt or VOUCH_ENROLL_SALT)")
 	}
 	saltBytes, err := hex.DecodeString(salt)
 	if err != nil {
-		log.Fatalf("Invalid enrollment token salt: %v", err)
+		log.Fatal().Err(err).Msg("Invalid enrollment token salt")
 	}
 
 	enrollAdmin := os.Getenv("VOUCH_ENROLL_ADMIN_TOKEN")
 	if *enrollAdminToken != "" {
 		if enrollAdmin != "" {
-			log.Printf("Warning: --enroll-admin-token overrides VOUCH_ENROLL_ADMIN_TOKEN")
+			log.Warn().Msg("--enroll-admin-token overrides VOUCH_ENROLL_ADMIN_TOKEN")
 		}
 		enrollAdmin = *enrollAdminToken
 	}
 	if enrollAdmin == "" {
-		log.Fatal("Missing enrollment admin token (set --enroll-admin-token or VOUCH_ENROLL_ADMIN_TOKEN)")
+		log.Fatal().Msg("Missing enrollment admin token (set --enroll-admin-token or VOUCH_ENROLL_ADMIN_TOKEN)")
 	}
 
 	srv := &Server{
@@ -101,6 +112,7 @@ func main() {
 		policy:           pol,
 		tokenHasher:      NewTokenHasher(saltBytes),
 		enrollAdminToken: enrollAdmin,
+		logger:           log.With().Str("component", "server").Logger(),
 	}
 	srv.nonceStore = NewNonceStore(db, 5*time.Minute)
 	srv.rateLimiter = NewRateLimiter()
@@ -112,10 +124,10 @@ func main() {
 			apiKey = os.Getenv("TAILSCALE_API_KEY")
 		}
 		if apiKey == "" {
-			log.Fatal("Enforcement enabled but no Tailscale API key provided")
+			log.Fatal().Msg("Enforcement enabled but no Tailscale API key provided")
 		}
 		srv.enforcer = enforcement.NewTailscaleEnforcer(apiKey, *tailnet, "tag:compliant")
-		log.Printf("✅ Tailscale enforcement enabled")
+		log.Info().Msg("Tailscale enforcement enabled")
 	}
 
 	// Setup HTTP routes
@@ -132,13 +144,23 @@ func main() {
 		c.JSON(200, gin.H{"status": "healthy", "version": Version})
 	})
 
-	log.Printf("Listening on %s", *listen)
-	r.Run(*listen)
+	metricsPath := os.Getenv("VOUCH_METRICS_PATH")
+	if metricsPath == "" {
+		metricsPath = "/debug/metrics"
+	}
+	r.GET(metricsPath, gin.WrapH(expvar.Handler()))
+
+	log.Info().Str("listen", *listen).Msg("Server listening")
+	if err := r.Run(*listen); err != nil {
+		log.Fatal().Err(err).Msg("Server run failed")
+	}
 }
 
 func (s *Server) handleReport(c *gin.Context) {
+	metricReportRequests.Add(1)
 	report, device, err := s.authenticateReport(c)
 	if err != nil {
+		metricReportFailures.Add(1)
 		return
 	}
 
@@ -152,28 +174,29 @@ func (s *Server) handleReport(c *gin.Context) {
 	device.PostureRaw = string(postureRaw)
 
 	if err := s.db.Save(device).Error; err != nil {
-		log.Printf("❌ Failed to persist device state %s: %v", device.AgentID, err)
+		metricReportFailures.Add(1)
+		s.logger.Error().Err(err).Str("agent_id", device.AgentID).Msg("Failed to persist device state")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist device"})
 		return
 	}
 
+	s.logger.Info().Str("agent_id", device.AgentID).Bool("compliant", eval.Compliant).Msg("Processed report")
+
 	if s.enforcer != nil && report.NodeID != "unknown" {
 		if eval.Compliant {
 			if err := s.enforcer.GrantAccess(report.NodeID); err != nil {
-				log.Printf("❌ Failed to grant access to %s: %v", report.Hostname, err)
+				s.logger.Error().Err(err).Str("hostname", report.Hostname).Msg("Failed to grant enforcement access")
 			} else {
-				log.Printf("✅ Granted access to %s", report.Hostname)
+				s.logger.Info().Str("hostname", report.Hostname).Msg("Granted access")
 			}
 		} else {
 			if err := s.enforcer.RevokeAccess(report.NodeID); err != nil {
-				log.Printf("❌ Failed to revoke access from %s: %v", report.Hostname, err)
+				s.logger.Error().Err(err).Str("hostname", report.Hostname).Msg("Failed to revoke enforcement access")
 			} else {
-				log.Printf("🚫 Revoked access from %s", report.Hostname)
+				s.logger.Warn().Str("hostname", report.Hostname).Msg("Revoked access")
 			}
 		}
 	}
-
-	log.Printf("%s: %s", report.Hostname, eval.String())
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":     "ok",
@@ -318,15 +341,44 @@ func (s *Server) manualEnforce(c *gin.Context) {
 func loadPolicy(path string) *policy.Policy {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		log.Printf("Warning: Could not load policy file %s: %v", path, err)
+		log.Warn().Str("path", path).Err(err).Msg("Could not load policy file")
 		return &policy.Policy{Rules: []policy.Rule{}}
 	}
 
 	var pol policy.Policy
 	if err := yaml.Unmarshal(data, &pol); err != nil {
-		log.Fatalf("Error parsing policy file: %v", err)
+		log.Fatal().Err(err).Msg("Error parsing policy file")
 	}
 
-	log.Printf("Loaded %d policy rules", len(pol.Rules))
+	log.Info().Int("rules", len(pol.Rules)).Msg("Loaded policy rules")
 	return &pol
+}
+
+func configureLogger() {
+	zerolog.TimeFieldFormat = time.RFC3339
+	zerolog.DurationFieldUnit = time.Millisecond
+
+	level := zerolog.InfoLevel
+	if raw := strings.ToLower(strings.TrimSpace(os.Getenv("VOUCH_LOG_LEVEL"))); raw != "" {
+		if parsed, err := zerolog.ParseLevel(raw); err == nil {
+			level = parsed
+		}
+	}
+
+	format := strings.ToLower(strings.TrimSpace(os.Getenv("VOUCH_LOG_FORMAT")))
+
+	var logger zerolog.Logger
+	if format == "json" {
+		logger = zerolog.New(os.Stdout).With().Timestamp().Logger()
+	} else {
+		writer := zerolog.ConsoleWriter{
+			Out:        os.Stdout,
+			TimeFormat: time.RFC3339,
+		}
+		logger = zerolog.New(writer).With().Timestamp().Logger()
+	}
+
+	logger = logger.Level(level)
+	log.Logger = logger
+	zerolog.SetGlobalLevel(level)
 }

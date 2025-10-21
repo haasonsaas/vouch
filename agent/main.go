@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
 	"math/rand"
 	"net/http"
 	"os"
@@ -21,6 +20,8 @@ import (
 	"github.com/haasonsaas/vouch/pkg/config"
 	"github.com/haasonsaas/vouch/pkg/health"
 	"github.com/haasonsaas/vouch/pkg/posture"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
 )
 
 var (
@@ -41,12 +42,13 @@ type Agent struct {
 func main() {
 	flag.Parse()
 
-	log.Printf("Vouch Agent %s starting...", Version)
+	configureAgentLogger()
+	log.Info().Str("version", Version).Msg("Vouch Agent starting")
 
 	// Load config
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
+		log.Fatal().Err(err).Msg("Failed to load config")
 	}
 
 	// CLI overrides
@@ -61,8 +63,10 @@ func main() {
 	}
 
 	if err := cfg.Validate(); err != nil {
-		log.Fatalf("Invalid config: %v", err)
+		log.Fatal().Err(err).Msg("Invalid config")
 	}
+
+	applyAgentLogging(cfg.Logging)
 
 	agent := &Agent{
 		config: cfg,
@@ -74,18 +78,16 @@ func main() {
 
 	// Load or enroll identity
 	if err := agent.loadOrEnroll(); err != nil {
-		log.Fatalf("Failed to initialize identity: %v", err)
+		log.Fatal().Err(err).Msg("Failed to initialize identity")
 	}
-
-	log.Printf("Agent ID: %s", agent.identity.AgentID)
-	log.Printf("Node ID: %s", agent.identity.NodeID)
-	log.Printf("Server: %s", cfg.Server.URL)
-	log.Printf("Report interval: %ds", cfg.Reporting.Interval)
+	log.Info().Str("agent_id", agent.identity.AgentID).Msg("Agent initialized")
+	log.Info().Str("node_id", agent.identity.NodeID).Msg("Agent identity")
+	log.Info().Str("server", cfg.Server.URL).Int("interval_s", cfg.Reporting.Interval).Msg("Configuration loaded")
 
 	// Run health check
 	healthStatus := health.Check(cfg.Server.URL, cfg.Health.TimeDriftMaxS)
 	if !healthStatus.Healthy {
-		log.Printf("⚠️  Health issues detected: %v", healthStatus.Issues)
+		log.Warn().Interface("issues", healthStatus.Issues).Msg("Health check reported issues")
 	}
 
 	// Report immediately on startup
@@ -105,15 +107,57 @@ func main() {
 	}
 }
 
+func configureAgentLogger() {
+	zerolog.TimeFieldFormat = time.RFC3339
+	zerolog.DurationFieldUnit = time.Millisecond
+
+	level := zerolog.InfoLevel
+	if raw := strings.ToLower(strings.TrimSpace(os.Getenv("VOUCH_AGENT_LOG_LEVEL"))); raw != "" {
+		if parsed, err := zerolog.ParseLevel(raw); err == nil {
+			level = parsed
+		}
+	}
+
+	format := strings.ToLower(strings.TrimSpace(os.Getenv("VOUCH_AGENT_LOG_FORMAT")))
+
+	logger := newAgentLogger(format)
+	log.Logger = logger.Level(level)
+	zerolog.SetGlobalLevel(level)
+}
+
+func applyAgentLogging(cfg config.LoggingConfig) {
+	level := zerolog.InfoLevel
+	if parsed, err := zerolog.ParseLevel(strings.ToLower(strings.TrimSpace(cfg.Level))); err == nil {
+		level = parsed
+	}
+
+	format := "console"
+	if cfg.JSON {
+		format = "json"
+	}
+
+	logger := newAgentLogger(format)
+	log.Logger = logger.Level(level)
+	zerolog.SetGlobalLevel(level)
+}
+
+func newAgentLogger(format string) zerolog.Logger {
+	if format == "json" {
+		return zerolog.New(os.Stdout).With().Timestamp().Logger()
+	}
+	writer := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: time.RFC3339}
+	return zerolog.New(writer).With().Timestamp().Logger()
+}
+
 func (a *Agent) loadOrEnroll() error {
 	// Try loading existing identity
 	identity, err := auth.LoadIdentity(a.keyPath)
 	if err == nil {
 		a.identity = identity
-		log.Printf("✅ Loaded existing identity")
+		log.Info().Str("agent_id", identity.AgentID).Msg("Loaded existing identity")
 		if a.config.Auth.AllowKeyRotation {
 			if err := a.ensureFreshKey(); err != nil {
-				log.Printf("⚠️  Key rotation check failed: %v", err)
+				log.Warn().Err(err).Msg("Key rotation check failed")
 			}
 		}
 		return nil
@@ -124,7 +168,7 @@ func (a *Agent) loadOrEnroll() error {
 		return fmt.Errorf("no existing identity and no enrollment token provided")
 	}
 
-	log.Printf("📝 Enrolling new agent...")
+	log.Info().Msg("Enrolling new agent")
 	return a.enroll()
 }
 
@@ -177,11 +221,11 @@ func (a *Agent) enroll() error {
 	}
 
 	a.identity = identity
-	log.Printf("✅ Enrollment successful - Agent ID: %s", identity.AgentID)
+	log.Info().Str("agent_id", identity.AgentID).Msg("Enrollment successful")
 
 	if a.config.Auth.AllowKeyRotation {
 		if err := a.ensureFreshKey(); err != nil {
-			log.Printf("⚠️  Post-enrollment rotation check failed: %v", err)
+			log.Warn().Err(err).Msg("Post-enrollment rotation check failed")
 		}
 	}
 
@@ -206,13 +250,13 @@ func (a *Agent) reportPosture() {
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		log.Printf("❌ Error sending report: %v", err)
+		log.Error().Err(err).Msg("Failed sending report")
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("❌ Server returned status %d", resp.StatusCode)
+		log.Error().Int("status", resp.StatusCode).Msg("Server returned non-OK status")
 		return
 	}
 
@@ -225,14 +269,14 @@ func (a *Agent) reportPosture() {
 	json.NewDecoder(resp.Body).Decode(&response)
 
 	if response.Compliant {
-		log.Printf("✅ Posture report accepted - compliant")
+		log.Info().Msg("Posture report accepted")
 	} else {
-		log.Printf("⚠️  Non-compliant - violations: %v", response.Violations)
+		log.Warn().Interface("violations", response.Violations).Msg("Non-compliant posture")
 	}
 
 	// Check version
 	if response.MinVersion != "" && response.MinVersion > Version {
-		log.Printf("⚠️  Agent version %s below minimum %s - update required", Version, response.MinVersion)
+		log.Warn().Str("current_version", Version).Str("required_version", response.MinVersion).Msg("Agent version below minimum")
 	}
 }
 
@@ -295,7 +339,7 @@ func (a *Agent) ensureFreshKey() error {
 	}
 
 	a.identity = newID
-	log.Printf("🔑 Rotated agent key successfully")
+	log.Info().Msg("Rotated agent key successfully")
 	return nil
 }
 

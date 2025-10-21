@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
-	"log"
 	"net/http"
 	"time"
 
@@ -91,13 +90,14 @@ func (s *Server) requireAuthenticatedAgent(c *gin.Context) {
 }
 
 func (s *Server) issueRotationChallenge(c *gin.Context) {
+	metricRotationRequests.Add(1)
 	device := c.MustGet("device").(*DeviceState)
 	now := time.Now().UTC()
 	force := c.Query("force") == "true"
 
 	if !device.RequiresRotation && !force {
 		if err := s.db.Where("agent_id = ?", device.AgentID).Delete(&RotationChallenge{}).Error; err != nil {
-			log.Printf("❌ Failed clearing stale rotation challenge for %s: %v", device.AgentID, err)
+			s.logger.Error().Err(err).Str("agent_id", device.AgentID).Msg("Failed clearing stale rotation challenge")
 		}
 		c.Status(http.StatusNoContent)
 		return
@@ -106,6 +106,7 @@ func (s *Server) issueRotationChallenge(c *gin.Context) {
 	var challenge RotationChallenge
 	if err := s.db.Where("agent_id = ?", device.AgentID).First(&challenge).Error; err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			metricRotationFailures.Add(1)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load challenge"})
 			return
 		}
@@ -134,9 +135,12 @@ func (s *Server) issueRotationChallenge(c *gin.Context) {
 		Columns:   []clause.Column{{Name: "agent_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"nonce", "issued_at", "expires_at"}),
 	}).Create(&challenge).Error; err != nil {
+		metricRotationFailures.Add(1)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist challenge"})
 		return
 	}
+
+	s.logger.Info().Str("agent_id", device.AgentID).Msg("Issued rotation challenge")
 
 	c.JSON(http.StatusOK, gin.H{
 		"challenge":  challenge.Nonce,
@@ -145,6 +149,7 @@ func (s *Server) issueRotationChallenge(c *gin.Context) {
 }
 
 func (s *Server) completeRotation(c *gin.Context) {
+	metricRotationRequests.Add(1)
 	device := c.MustGet("device").(*DeviceState)
 
 	var req struct {
@@ -154,11 +159,13 @@ func (s *Server) completeRotation(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		metricRotationFailures.Add(1)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	if req.Challenge == "" || req.PublicKey == "" || req.Signature == "" {
+		metricRotationFailures.Add(1)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing fields"})
 		return
 	}
@@ -166,8 +173,10 @@ func (s *Server) completeRotation(c *gin.Context) {
 	var challenge RotationChallenge
 	if err := s.db.Where("agent_id = ?", device.AgentID).First(&challenge).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			metricRotationFailures.Add(1)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "no pending challenge"})
 		} else {
+			metricRotationFailures.Add(1)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load challenge"})
 		}
 		return
@@ -175,28 +184,33 @@ func (s *Server) completeRotation(c *gin.Context) {
 
 	if time.Now().UTC().After(challenge.ExpiresAt) {
 		s.db.Where("agent_id = ?", device.AgentID).Delete(&RotationChallenge{})
+		metricRotationFailures.Add(1)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "challenge expired"})
 		return
 	}
 
 	if subtle.ConstantTimeCompare([]byte(challenge.Nonce), []byte(req.Challenge)) != 1 {
+		metricRotationFailures.Add(1)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "challenge mismatch"})
 		return
 	}
 
 	newKeyBytes, err := base64.StdEncoding.DecodeString(req.PublicKey)
 	if err != nil || len(newKeyBytes) != ed25519.PublicKeySize {
+		metricRotationFailures.Add(1)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid public key"})
 		return
 	}
 
 	sigBytes, err := base64.StdEncoding.DecodeString(req.Signature)
 	if err != nil {
+		metricRotationFailures.Add(1)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid signature encoding"})
 		return
 	}
 
 	if !ed25519.Verify(ed25519.PublicKey(newKeyBytes), []byte(challenge.Nonce), sigBytes) {
+		metricRotationFailures.Add(1)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "challenge signature invalid"})
 		return
 	}
@@ -224,7 +238,7 @@ func (s *Server) completeRotation(c *gin.Context) {
 
 	device.PublicKey = append([]byte(nil), newKeyBytes...)
 	device.RequiresRotation = false
-	log.Printf("🔑 Rotated key for agent %s", device.AgentID)
+	s.logger.Info().Str("agent_id", device.AgentID).Msg("Rotated agent key")
 	c.JSON(http.StatusOK, gin.H{"status": "rotated"})
 }
 
@@ -269,7 +283,7 @@ func (s *Server) markRotationRequired(c *gin.Context) {
 	}
 
 	if err := s.db.Where("agent_id = ?", agentID).Delete(&RotationChallenge{}).Error; err != nil {
-		log.Printf("⚠️  Failed clearing prior rotation challenge for %s: %v", agentID, err)
+		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("Failed clearing prior rotation challenge")
 	}
 
 	c.Status(http.StatusNoContent)
@@ -297,7 +311,7 @@ func (s *Server) clearRotationRequirement(c *gin.Context) {
 	}
 
 	if err := s.db.Where("agent_id = ?", agentID).Delete(&RotationChallenge{}).Error; err != nil {
-		log.Printf("⚠️  Failed clearing rotation challenge for %s: %v", agentID, err)
+		s.logger.Warn().Err(err).Str("agent_id", agentID).Msg("Failed clearing rotation challenge")
 	}
 
 	c.Status(http.StatusNoContent)

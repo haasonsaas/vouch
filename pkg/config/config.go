@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -20,18 +21,19 @@ type ServerConfig struct {
 	URL             string `yaml:"url"`
 	EnrollToken     string `yaml:"enroll_token"`
 	RequestTimeout  int    `yaml:"request_timeout_s"`
+	MetricsEndpoint string `yaml:"metrics_endpoint"`
 }
 
 type AuthConfig struct {
-	KeyPath           string `yaml:"key_path"`
-	AllowKeyRotation  bool   `yaml:"allow_key_rotation"`
+	KeyPath          string `yaml:"key_path"`
+	AllowKeyRotation bool   `yaml:"allow_key_rotation"`
 }
 
 type ReportingConfig struct {
-	Interval                  int  `yaml:"interval_s"`
-	Jitter                    int  `yaml:"jitter_s"`
-	IncludeListeningServices  bool `yaml:"include_listening_services"`
-	RedactHostnames           bool `yaml:"redact_hostnames"`
+	Interval                 int  `yaml:"interval_s"`
+	Jitter                   int  `yaml:"jitter_s"`
+	IncludeListeningServices bool `yaml:"include_listening_services"`
+	RedactHostnames          bool `yaml:"redact_hostnames"`
 }
 
 type ChecksConfig struct {
@@ -45,13 +47,13 @@ type ChecksConfig struct {
 }
 
 type TailscaleCheck struct {
-	Enable        bool   `yaml:"enable"`
+	Enable         bool   `yaml:"enable"`
 	LocalAPISocket string `yaml:"localapi_socket"`
 }
 
 type FirewallCheck struct {
-	Enable       bool   `yaml:"enable"`
-	LinuxPrefer  string `yaml:"linux_prefer"`
+	Enable      bool   `yaml:"enable"`
+	LinuxPrefer string `yaml:"linux_prefer"`
 }
 
 type UpdatesCheck struct {
@@ -69,13 +71,13 @@ type SecureBootCheck struct {
 }
 
 type AntiMalwareCheck struct {
-	Enable              bool `yaml:"enable"`
-	MinSigRecencyDays   int  `yaml:"min_sig_recency_days"`
+	Enable            bool `yaml:"enable"`
+	MinSigRecencyDays int  `yaml:"min_sig_recency_days"`
 }
 
 type HardeningCheck struct {
-	SELinuxAppArmorEnforcing   bool `yaml:"selinux_apparmor_enforcing"`
-	SSHPasswordAuthDisabled    bool `yaml:"ssh_password_auth_disabled"`
+	SELinuxAppArmorEnforcing bool `yaml:"selinux_apparmor_enforcing"`
+	SSHPasswordAuthDisabled  bool `yaml:"ssh_password_auth_disabled"`
 }
 
 type HealthConfig struct {
@@ -84,8 +86,9 @@ type HealthConfig struct {
 }
 
 type LoggingConfig struct {
-	Level string `yaml:"level"`
-	JSON  bool   `yaml:"json"`
+	Level         string `yaml:"level"`
+	JSON          bool   `yaml:"json"`
+	HumanReadable bool   `yaml:"human_readable"`
 }
 
 type UpdatesConfig struct {
@@ -99,8 +102,9 @@ type UpdatesConfig struct {
 func DefaultConfig() *AgentConfig {
 	return &AgentConfig{
 		Server: ServerConfig{
-			URL:            "http://localhost:8080",
-			RequestTimeout: 10,
+			URL:             "https://localhost:8443",
+			RequestTimeout:  10,
+			MetricsEndpoint: "",
 		},
 		Auth: AuthConfig{
 			KeyPath:          "/var/lib/vouch/agent_key",
@@ -145,8 +149,9 @@ func DefaultConfig() *AgentConfig {
 			TimeDriftMaxS: 120,
 		},
 		Logging: LoggingConfig{
-			Level: "info",
-			JSON:  false,
+			Level:         "info",
+			JSON:          false,
+			HumanReadable: true,
 		},
 		Updates: UpdatesConfig{
 			SelfUpdate:      false,
@@ -193,6 +198,12 @@ func (c *AgentConfig) Validate() error {
 	}
 	if c.Reporting.Interval < 10 {
 		return ErrInvalidInterval
+	}
+	if !strings.HasPrefix(c.Server.URL, "https://") {
+		return &ConfigError{"server URL must be https"}
+	}
+	if c.Server.RequestTimeout <= 0 {
+		c.Server.RequestTimeout = 10
 	}
 	return nil
 }

@@ -72,6 +72,7 @@ func (s *Server) handleIssueToken(c *gin.Context) {
 	defer s.tokensMu.Unlock()
 
 	if err := s.db.Create(&record).Error; err != nil {
+		s.logger.Error().Err(err).Msg("Failed to persist enrollment token")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist token"})
 		return
 	}
@@ -90,6 +91,7 @@ func (s *Server) handleListTokens(c *gin.Context) {
 
 	var tokens []EnrollmentToken
 	if err := s.db.Order("created_at desc").Find(&tokens).Error; err != nil {
+		s.logger.Error().Err(err).Msg("Failed to list enrollment tokens")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list tokens"})
 		return
 	}
@@ -124,6 +126,7 @@ func (s *Server) handleRevokeToken(c *gin.Context) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "token not found"})
 			return
 		}
+		s.logger.Error().Err(err).Msg("Failed to load enrollment token")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to load token"})
 		return
 	}
@@ -134,6 +137,7 @@ func (s *Server) handleRevokeToken(c *gin.Context) {
 		"redeemed_by": fmt.Sprintf("revoked:%d", now.Unix()),
 	}
 	if err := s.db.Model(&token).Updates(updates).Error; err != nil {
+		s.logger.Error().Err(err).Msg("Failed to revoke enrollment token")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to revoke token"})
 		return
 	}
@@ -142,6 +146,7 @@ func (s *Server) handleRevokeToken(c *gin.Context) {
 }
 
 func (s *Server) handleEnrollment(c *gin.Context) {
+	metricEnrollRequests.Add(1)
 	var req struct {
 		Token        string `json:"token"`
 		NodeID       string `json:"node_id"`
@@ -150,17 +155,20 @@ func (s *Server) handleEnrollment(c *gin.Context) {
 		OSInfo       string `json:"os_info"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
+		metricEnrollFailures.Add(1)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	if req.Token == "" || req.NodeID == "" || req.PublicKeyB64 == "" {
+		metricEnrollFailures.Add(1)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing required fields"})
 		return
 	}
 
 	pubKey, err := base64.StdEncoding.DecodeString(req.PublicKeyB64)
 	if err != nil || len(pubKey) != ed25519.PublicKeySize {
+		metricEnrollFailures.Add(1)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid public key"})
 		return
 	}
@@ -172,17 +180,21 @@ func (s *Server) handleEnrollment(c *gin.Context) {
 	query := s.db.Clauses(clause.Locking{Strength: "UPDATE"}).Where("token_hash = ?", s.tokenHasher.HashString(req.Token))
 	if err := query.First(&token).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
+			metricEnrollFailures.Add(1)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid token"})
 			return
 		}
+		metricEnrollFailures.Add(1)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "token lookup failed"})
 		return
 	}
 	if token.UsedAt != nil {
+		metricEnrollFailures.Add(1)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "token already used"})
 		return
 	}
 	if !token.ExpiresAt.IsZero() && time.Now().After(token.ExpiresAt) {
+		metricEnrollFailures.Add(1)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "token expired"})
 		return
 	}
@@ -190,10 +202,12 @@ func (s *Server) handleEnrollment(c *gin.Context) {
 	if s.enforcer != nil {
 		info, err := s.enforcer.GetDeviceInfo(req.NodeID)
 		if err != nil {
+			metricEnrollFailures.Add(1)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "tailscale verification failed"})
 			return
 		}
 		if hostname, ok := info["hostname"].(string); ok && hostname != "" && req.Hostname != "" && !strings.EqualFold(hostname, req.Hostname) {
+			metricEnrollFailures.Add(1)
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "tailscale hostname mismatch"})
 			return
 		}
@@ -207,6 +221,7 @@ func (s *Server) handleEnrollment(c *gin.Context) {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			state = DeviceState{NodeID: req.NodeID}
 		} else {
+			metricEnrollFailures.Add(1)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "device lookup failed"})
 			return
 		}
@@ -221,6 +236,7 @@ func (s *Server) handleEnrollment(c *gin.Context) {
 	state.TagCompliant = false
 
 	if err := s.db.Save(&state).Error; err != nil {
+		metricEnrollFailures.Add(1)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to persist device"})
 		return
 	}
@@ -230,9 +246,12 @@ func (s *Server) handleEnrollment(c *gin.Context) {
 		"used_at":     now,
 		"redeemed_by": state.AgentID,
 	}).Error; err != nil {
+		metricEnrollFailures.Add(1)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to mark token used"})
 		return
 	}
+
+	s.logger.Info().Str("agent_id", state.AgentID).Str("node_id", state.NodeID).Msg("Enrollment completed")
 
 	c.JSON(http.StatusOK, gin.H{
 		"agent_id":       state.AgentID,
