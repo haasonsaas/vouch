@@ -9,6 +9,7 @@ import (
 	"errors"
 	"expvar"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -31,15 +32,17 @@ import (
 )
 
 var (
-	listen            = flag.String("listen", ":8080", "Listen address")
-	policyFile        = flag.String("policy", "policies.yaml", "Policy file path")
-	dbPath            = flag.String("db", "vouch.db", "Database path")
-	tailscaleAPIKey   = flag.String("tailscale-api-key", "", "Tailscale API key (or set TAILSCALE_API_KEY)")
-	tailnet           = flag.String("tailnet", "", "Tailscale tailnet name")
-	enableEnforcement = flag.Bool("enforce", false, "Enable Tailscale ACL enforcement")
-	enrollTokenSalt   = flag.String("enroll-token-salt", "", "Hex-encoded secret used to hash enrollment tokens (or set VOUCH_ENROLL_SALT)")
-	enrollAdminToken  = flag.String("enroll-admin-token", "", "Bearer token required to manage enrollment tokens (or set VOUCH_ENROLL_ADMIN_TOKEN)")
-	Version           = "dev"
+	listen              = flag.String("listen", ":8080", "Listen address")
+	policyFile          = flag.String("policy", "policies.yaml", "Policy file path")
+	dbPath              = flag.String("db", "vouch.db", "Database path")
+	tailscaleAPIKey     = flag.String("tailscale-api-key", "", "Tailscale API key (or set TAILSCALE_API_KEY)")
+	tailnet             = flag.String("tailnet", "", "Tailscale tailnet name")
+	enableEnforcement   = flag.Bool("enforce", false, "Enable Tailscale ACL enforcement")
+	enrollTokenSalt     = flag.String("enroll-token-salt", "", "Hex-encoded secret used to hash enrollment tokens (or set VOUCH_ENROLL_SALT)")
+	enrollAdminToken    = flag.String("enroll-admin-token", "", "Bearer token required to manage enrollment tokens (or set VOUCH_ENROLL_ADMIN_TOKEN)")
+	externalAPIKey      = flag.String("external-api-key", "", "API key for external device queries (or set VOUCH_EXTERNAL_API_KEY)")
+	enableExternalQuery = flag.Bool("enable-external-query", false, "Enable external device query API")
+	Version             = "dev"
 
 	metricEnrollRequests   = expvar.NewInt("enroll_requests_total")
 	metricEnrollFailures   = expvar.NewInt("enroll_failures_total")
@@ -50,17 +53,19 @@ var (
 )
 
 type Server struct {
-	db               *gorm.DB
-	policy           *policy.Policy
-	enforcer         *enforcement.TailscaleEnforcer
-	tokenHasher      TokenHasher
-	enrollAdminToken string
-	tokensMu         sync.Mutex
-	deviceMu         sync.Mutex
-	nonceStore       *NonceStore
-	rateLimiter      *RateLimiter
-	rotationMu       sync.Mutex
-	logger           zerolog.Logger
+	db                  *gorm.DB
+	policy              *policy.Policy
+	enforcer            *enforcement.TailscaleEnforcer
+	tokenHasher         TokenHasher
+	enrollAdminToken    string
+	externalAPIKey      string
+	enableExternalQuery bool
+	tokensMu            sync.Mutex
+	deviceMu            sync.Mutex
+	nonceStore          *NonceStore
+	rateLimiter         *RateLimiter
+	rotationMu          sync.Mutex
+	logger              zerolog.Logger
 }
 
 func main() {
@@ -146,12 +151,26 @@ func main() {
 		log.Fatal().Msg("Missing enrollment admin token (set --enroll-admin-token or VOUCH_ENROLL_ADMIN_TOKEN)")
 	}
 
+	// Setup external API key if external query is enabled
+	extAPIKey := os.Getenv("VOUCH_EXTERNAL_API_KEY")
+	if *externalAPIKey != "" {
+		if extAPIKey != "" {
+			log.Warn().Msg("--external-api-key overrides VOUCH_EXTERNAL_API_KEY")
+		}
+		extAPIKey = *externalAPIKey
+	}
+	if *enableExternalQuery && extAPIKey == "" {
+		log.Fatal().Msg("External query enabled but no API key provided (set --external-api-key or VOUCH_EXTERNAL_API_KEY)")
+	}
+
 	srv := &Server{
-		db:               db,
-		policy:           pol,
-		tokenHasher:      NewTokenHasher(saltBytes),
-		enrollAdminToken: enrollAdmin,
-		logger:           log.With().Str("component", "server").Logger(),
+		db:                  db,
+		policy:              pol,
+		tokenHasher:         NewTokenHasher(saltBytes),
+		enrollAdminToken:    enrollAdmin,
+		externalAPIKey:      extAPIKey,
+		enableExternalQuery: *enableExternalQuery,
+		logger:              log.With().Str("component", "server").Logger(),
 	}
 	srv.nonceStore = NewNonceStore(db, 5*time.Minute)
 	srv.rateLimiter = NewRateLimiter()
@@ -179,6 +198,13 @@ func main() {
 	srv.registerKeyRotationRoutes(r)
 	r.GET("/v1/devices", srv.listDevices)
 	r.GET("/v1/devices/:hostname", srv.getDevice)
+	
+	// External API for Keep integration (with API key auth)
+	if srv.enableExternalQuery {
+		r.GET("/v1/external/devices/:identifier", srv.requireAPIKey, srv.getDeviceExternal)
+		log.Info().Msg("External device query API enabled")
+	}
+	
 	r.POST("/v1/enforce/:hostname", srv.manualEnforce)
 	r.GET("/v1/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "healthy", "version": Version})
@@ -400,6 +426,286 @@ func loadPolicy(path string) *policy.Policy {
 
 	log.Info().Int("rules", len(pol.Rules)).Msg("Loaded policy rules")
 	return &pol
+}
+
+// KeepDevicePosture represents device posture in Keep format
+type KeepDevicePosture struct {
+	ID         string                 `json:"id"`
+	Hostname   string                 `json:"hostname"`
+	NodeID     string                 `json:"node_id"`
+	Posture    string                 `json:"posture"`
+	TrustScore int                    `json:"trust_score"`
+	LastSeen   time.Time              `json:"last_seen"`
+	Attributes map[string]interface{} `json:"attributes"`
+	Compliance struct {
+		Compliant     bool      `json:"compliant"`
+		Violations    []string  `json:"violations"`
+		LastEvaluated time.Time `json:"last_evaluated"`
+	} `json:"compliance"`
+}
+
+// requireAPIKey middleware validates external API key
+func (s *Server) requireAPIKey(c *gin.Context) {
+	if !s.enableExternalQuery {
+		c.JSON(http.StatusNotFound, gin.H{"error": "endpoint not enabled"})
+		c.Abort()
+		return
+	}
+
+	authHeader := c.GetHeader("Authorization")
+	if authHeader == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "missing authorization header"})
+		c.Abort()
+		return
+	}
+
+	if !strings.HasPrefix(authHeader, "Bearer ") {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid authorization format"})
+		c.Abort()
+		return
+	}
+
+	apiKey := strings.TrimPrefix(authHeader, "Bearer ")
+	if apiKey != s.externalAPIKey {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid api key"})
+		c.Abort()
+		return
+	}
+
+	c.Next()
+}
+
+// getDeviceExternal handles external device queries with Keep format support
+func (s *Server) getDeviceExternal(c *gin.Context) {
+	identifier := c.Param("identifier")
+	format := c.DefaultQuery("format", "standard")
+	
+	var device DeviceState
+	
+	// Try different lookup strategies
+	query := s.db.Where("hostname = ? OR node_id = ? OR agent_id = ?", identifier, identifier, identifier)
+	if err := query.First(&device).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":      "device not found",
+				"message":    "Device not registered in Vouch",
+				"request_id": requestID(c),
+			})
+		} else {
+			s.logger.Error().Err(err).Str("identifier", identifier).Msg("Database error during device lookup")
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":      "internal error",
+				"request_id": requestID(c),
+			})
+		}
+		return
+	}
+
+	// Check if data is stale (>24h)
+	if time.Since(device.LastSeen) > 24*time.Hour {
+		c.JSON(http.StatusGone, gin.H{
+			"error":      "device data stale",
+			"message":    "Device hasn't reported in >24 hours",
+			"last_seen":  device.LastSeen,
+			"request_id": requestID(c),
+		})
+		return
+	}
+
+	if format == "keep" {
+		keepDevice := s.transformToKeepFormat(&device)
+		
+		// Add cache headers
+		c.Header("Cache-Control", "private, max-age=300")
+		c.Header("X-Vouch-Cache-TTL", "300")
+		c.Header("X-Vouch-Data-Age", fmt.Sprintf("%.0f", time.Since(device.LastSeen).Seconds()))
+		
+		c.JSON(http.StatusOK, keepDevice)
+	} else {
+		// Standard format - return full DeviceState with parsed posture
+		response := s.transformToStandardFormat(&device)
+		c.JSON(http.StatusOK, response)
+	}
+}
+
+// transformToKeepFormat converts DeviceState to Keep format
+func (s *Server) transformToKeepFormat(device *DeviceState) *KeepDevicePosture {
+	// Parse posture data
+	var postureData posture.ReportV2
+	if device.PostureRaw != "" {
+		if err := json.Unmarshal([]byte(device.PostureRaw), &postureData); err != nil {
+			s.logger.Warn().Err(err).Str("agent_id", device.AgentID).Msg("Failed to parse posture data")
+		}
+	}
+
+	// Parse violations
+	var violations []string
+	if device.Violations != "" && device.Violations != "null" {
+		if err := json.Unmarshal([]byte(device.Violations), &violations); err != nil {
+			s.logger.Warn().Err(err).Str("agent_id", device.AgentID).Msg("Failed to parse violations")
+		}
+	}
+
+	// Calculate trust score
+	trustScore := s.calculateTrustScore(&postureData, violations)
+	
+	// Determine posture status
+	postureStatus := s.determinePostureStatus(device.Compliant, trustScore, device.LastSeen)
+
+	// Build attributes map
+	attributes := make(map[string]interface{})
+	if device.PostureRaw != "" {
+		attributes["os"] = postureData.OS
+		attributes["os_version"] = postureData.OSName
+		attributes["encrypted"] = postureData.RootVolumeEncrypted
+		attributes["encryption_type"] = postureData.EncryptionType
+		attributes["firewall"] = postureData.FirewallEnabled
+		attributes["firewall_type"] = postureData.FirewallType
+		attributes["updates_current"] = postureData.UpdatesOutstanding == 0
+		attributes["updates_outstanding"] = postureData.UpdatesOutstanding
+		attributes["auto_updates"] = postureData.AutoUpdateEnabled
+		attributes["secure_boot"] = postureData.SecureBootEnabled
+		attributes["tpm_present"] = postureData.TPMPresent
+		attributes["tailscale_online"] = postureData.TailscaleOnline
+		attributes["tailscale_version"] = postureData.TailscaleVersion
+		
+		// EDR detection
+		if postureData.SentinelOneInstalled {
+			attributes["edr_healthy"] = postureData.SentinelOneHealthy
+			attributes["edr_vendor"] = "sentinelone"
+			attributes["edr_version"] = postureData.SentinelOneVersion
+		} else if postureData.CrowdStrikeInstalled {
+			attributes["edr_healthy"] = postureData.CrowdStrikeHealthy
+			attributes["edr_vendor"] = "crowdstrike" 
+			attributes["edr_version"] = postureData.CrowdStrikeVersion
+		} else {
+			attributes["edr_healthy"] = false
+		}
+		
+		if postureData.LastUpdateTime != nil {
+			attributes["last_update_check"] = *postureData.LastUpdateTime
+		}
+	}
+
+	return &KeepDevicePosture{
+		ID:         device.AgentID,
+		Hostname:   device.Hostname,
+		NodeID:     device.NodeID,
+		Posture:    postureStatus,
+		TrustScore: trustScore,
+		LastSeen:   device.LastSeen,
+		Attributes: attributes,
+		Compliance: struct {
+			Compliant     bool      `json:"compliant"`
+			Violations    []string  `json:"violations"`
+			LastEvaluated time.Time `json:"last_evaluated"`
+		}{
+			Compliant:     device.Compliant,
+			Violations:    violations,
+			LastEvaluated: device.UpdatedAt,
+		},
+	}
+}
+
+// calculateTrustScore computes a trust score based on posture data
+func (s *Server) calculateTrustScore(posture *posture.ReportV2, violations []string) int {
+	score := 100
+
+	// Deductions based on spec
+	if !posture.RootVolumeEncrypted {
+		score -= 30
+	}
+	if !posture.FirewallEnabled {
+		score -= 20
+	}
+	if !posture.SentinelOneHealthy && !posture.CrowdStrikeHealthy {
+		score -= 25
+	}
+	if posture.UpdatesOutstanding > 10 {
+		score -= 15
+	}
+	if !posture.AutoUpdateEnabled {
+		score -= 10
+	}
+	if posture.RebootPending {
+		score -= 5
+	}
+	if posture.LastUpdateTime != nil && time.Since(*posture.LastUpdateTime) > 30*24*time.Hour {
+		score -= 20
+	}
+	if !posture.SecureBootEnabled && posture.OS != "darwin" {
+		score -= 10
+	}
+	if !posture.TPMPresent && posture.OS != "darwin" {
+		score -= 5
+	}
+	if !posture.TailscaleOnline {
+		score -= 15
+	}
+
+	// Additional deduction for each violation
+	score -= len(violations) * 5
+
+	if score < 0 {
+		score = 0
+	}
+
+	return score
+}
+
+// determinePostureStatus maps compliance and trust score to posture status
+func (s *Server) determinePostureStatus(compliant bool, trustScore int, lastSeen time.Time) string {
+	timeSinceLastSeen := time.Since(lastSeen)
+	
+	if timeSinceLastSeen > 24*time.Hour {
+		return "unknown"
+	}
+	
+	if timeSinceLastSeen > 10*time.Minute {
+		return "degraded"
+	}
+	
+	if compliant && trustScore >= 70 {
+		return "healthy"
+	}
+	
+	return "degraded"
+}
+
+// transformToStandardFormat converts DeviceState to standard format
+func (s *Server) transformToStandardFormat(device *DeviceState) map[string]interface{} {
+	var postureData posture.ReportV2
+	if device.PostureRaw != "" {
+		json.Unmarshal([]byte(device.PostureRaw), &postureData)
+	}
+
+	var violations []string
+	if device.Violations != "" && device.Violations != "null" {
+		json.Unmarshal([]byte(device.Violations), &violations)
+	}
+
+	return map[string]interface{}{
+		"device_id":        device.AgentID,
+		"node_id":          device.NodeID,
+		"hostname":         device.Hostname,
+		"os":               postureData.OS,
+		"arch":             postureData.Arch,
+		"os_name":          postureData.OSName,
+		"kernel":           postureData.Kernel,
+		"last_report_time": device.LastSeen,
+		"posture":          postureData,
+		"compliance": map[string]interface{}{
+			"compliant":      device.Compliant,
+			"violations":     violations,
+			"last_evaluated": device.UpdatedAt,
+			"policy_version": "v1.0.0",
+		},
+		"metadata": map[string]interface{}{
+			"enrolled_at":        device.CreatedAt,
+			"last_key_rotation":  nil, // TODO: implement if needed
+			"agent_version":      "unknown", // TODO: track agent version
+		},
+	}
 }
 
 func configureLogger() {
