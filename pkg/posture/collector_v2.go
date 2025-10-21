@@ -17,41 +17,41 @@ type ReportV2 struct {
 	// Identity
 	NodeID   string `json:"node_id"`
 	Hostname string `json:"hostname"`
-	OS       string `json:"os"`       // linux, darwin, windows
-	Arch     string `json:"arch"`     // amd64, arm64
-	
+	OS       string `json:"os"`   // linux, darwin, windows
+	Arch     string `json:"arch"` // amd64, arm64
+
 	// OS Info
-	OSName    string `json:"os_name"`     // Ubuntu 24.04, macOS 14.5, Windows 11
-	Kernel    string `json:"kernel"`      // 6.8.0-47-generic
-	
+	OSName string `json:"os_name"` // Ubuntu 24.04, macOS 14.5, Windows 11
+	Kernel string `json:"kernel"`  // 6.8.0-47-generic
+
 	// Updates
 	LastUpdateTime     *time.Time `json:"last_update_time,omitempty"`
 	UpdatesOutstanding int        `json:"updates_outstanding"`
 	AutoUpdateEnabled  bool       `json:"auto_update_enabled"`
 	RebootPending      bool       `json:"reboot_pending"`
-	
+
 	// Disk Encryption
 	RootVolumeEncrypted bool     `json:"root_volume_encrypted"`
 	EncryptedVolumes    []string `json:"encrypted_volumes,omitempty"`
 	EncryptionType      string   `json:"encryption_type,omitempty"` // luks, filevault, bitlocker
-	
+
 	// Tailscale
-	TailscaleVersion   string `json:"tailscale_version,omitempty"`
-	TailscaleOnline    bool   `json:"tailscale_online"`
-	TailscaleAutoUpdate bool  `json:"tailscale_auto_update"`
-	
+	TailscaleVersion    string `json:"tailscale_version,omitempty"`
+	TailscaleOnline     bool   `json:"tailscale_online"`
+	TailscaleAutoUpdate bool   `json:"tailscale_auto_update"`
+
 	// Firewall
 	FirewallEnabled bool   `json:"firewall_enabled"`
 	FirewallType    string `json:"firewall_type,omitempty"` // ufw, nftables, iptables, pf, windows-defender
-	
+
 	// Security
 	SecureBootEnabled bool   `json:"secure_boot_enabled"`
 	TPMPresent        bool   `json:"tpm_present"`
 	TPMVersion        string `json:"tpm_version,omitempty"`
-	
+
 	// Services (top 10 most relevant)
 	CriticalServices []string `json:"critical_services,omitempty"`
-	
+
 	// Metadata
 	CollectedAt time.Time         `json:"collected_at"`
 	Errors      map[string]string `json:"errors,omitempty"` // probe_name -> error_message
@@ -155,7 +155,7 @@ func (c *CollectorV2) probeOSInfo(ctx context.Context, r *ReportV2) {
 			r.OSName = "macOS " + strings.TrimSpace(string(out))
 		}
 	case "windows":
-		out, err := execWithTimeout(ctx, "powershell", "-Command", 
+		out, err := execWithTimeout(ctx, "powershell", "-Command",
 			"(Get-CimInstance Win32_OperatingSystem).Caption")
 		if err == nil {
 			r.OSName = strings.TrimSpace(string(out))
@@ -201,13 +201,13 @@ func (c *CollectorV2) probeLinuxUpdates(ctx context.Context, r *ReportV2) {
 
 	// Last update time - try multiple package managers
 	paths := []string{
-		"/var/lib/apt/lists",           // Debian/Ubuntu
-		"/var/cache/dnf",                // RHEL/Fedora
-		"/var/lib/pacman/sync",          // Arch
-		"/var/cache/apk",                // Alpine
-		"/var/lib/dpkg/status",          // Debian/Ubuntu fallback
+		"/var/lib/apt/lists",   // Debian/Ubuntu
+		"/var/cache/dnf",       // RHEL/Fedora
+		"/var/lib/pacman/sync", // Arch
+		"/var/cache/apk",       // Alpine
+		"/var/lib/dpkg/status", // Debian/Ubuntu fallback
 	}
-	
+
 	for _, path := range paths {
 		if info, err := os.Stat(path); err == nil {
 			t := info.ModTime()
@@ -219,7 +219,7 @@ func (c *CollectorV2) probeLinuxUpdates(ctx context.Context, r *ReportV2) {
 	// Check for pending reboot
 	_, err := os.Stat("/var/run/reboot-required")
 	r.RebootPending = (err == nil)
-	
+
 	// Count outstanding updates (best-effort)
 	if out, err := execWithTimeout(ctx, "apt", "list", "--upgradable"); err == nil {
 		lines := strings.Split(string(out), "\n")
@@ -233,7 +233,7 @@ func (c *CollectorV2) probeMacOSUpdates(ctx context.Context, r *ReportV2) {
 	if err == nil {
 		r.UpdatesOutstanding = strings.Count(string(out), "recommended")
 	}
-	
+
 	// Auto-update status
 	out, err = execWithTimeout(ctx, "defaults", "read", "/Library/Preferences/com.apple.SoftwareUpdate", "AutomaticCheckEnabled")
 	if err == nil && strings.TrimSpace(string(out)) == "1" {
@@ -354,7 +354,7 @@ func (c *CollectorV2) probeTailscale(ctx context.Context, r *ReportV2) {
 	// Check auto-update (best-effort via prefs)
 	if out, err := execWithTimeout(ctx, "tailscale", "debug", "prefs"); err == nil {
 		var prefs map[string]interface{}
-		if json.Unmarshal(out, &prefs) == nil {
+		if err := json.Unmarshal(out, &prefs); err == nil {
 			if au, ok := prefs["AutoUpdate"].(map[string]interface{}); ok {
 				if check, ok := au["Check"].(bool); ok {
 					r.TailscaleAutoUpdate = check
@@ -464,7 +464,7 @@ func (c *CollectorV2) probeSecureBoot(ctx context.Context, r *ReportV2) {
 func (c *CollectorV2) probeServices(ctx context.Context, r *ReportV2) {
 	// List critical services only (SSH, Docker, etc.)
 	critical := []string{"sshd", "docker", "dockerd", "tailscaled"}
-	
+
 	for _, svc := range critical {
 		out, err := execWithTimeout(ctx, "systemctl", "is-active", svc)
 		if err == nil && strings.TrimSpace(string(out)) == "active" {

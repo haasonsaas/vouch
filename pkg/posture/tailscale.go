@@ -24,24 +24,24 @@ func CollectTailscalePosture(localAPISocket string) (*TailscalePosture, error) {
 	var status struct {
 		Version string `json:"Version"`
 		Self    struct {
-			ID          string `json:"ID"`
-			Online      bool   `json:"Online"`
-			Relay       string `json:"Relay"`
-			RxBytes     int64  `json:"RxBytes"`
-			TxBytes     int64  `json:"TxBytes"`
-			Created     string `json:"Created"`
-			LastSeen    string `json:"LastSeen"`
-			OS          string `json:"OS"`
-			HostName    string `json:"HostName"`
-			DNSName     string `json:"DNSName"`
-			UserID      int    `json:"UserID"`
+			ID           string   `json:"ID"`
+			Online       bool     `json:"Online"`
+			Relay        string   `json:"Relay"`
+			RxBytes      int64    `json:"RxBytes"`
+			TxBytes      int64    `json:"TxBytes"`
+			Created      string   `json:"Created"`
+			LastSeen     string   `json:"LastSeen"`
+			OS           string   `json:"OS"`
+			HostName     string   `json:"HostName"`
+			DNSName      string   `json:"DNSName"`
+			UserID       int      `json:"UserID"`
 			TailscaleIPs []string `json:"TailscaleIPs"`
 		} `json:"Self"`
-		BackendState string `json:"BackendState"`
+		BackendState   string `json:"BackendState"`
 		CurrentTailnet struct {
-			Name         string `json:"Name"`
-			MagicDNSSuffix string `json:"MagicDNSSuffix"`
-			MagicDNSEnabled bool  `json:"MagicDNSEnabled"`
+			Name            string `json:"Name"`
+			MagicDNSSuffix  string `json:"MagicDNSSuffix"`
+			MagicDNSEnabled bool   `json:"MagicDNSEnabled"`
 		} `json:"CurrentTailnet"`
 	}
 
@@ -52,11 +52,11 @@ func CollectTailscalePosture(localAPISocket string) (*TailscalePosture, error) {
 	// Check if auto-update is enabled (via prefs)
 	autoUpdate := false
 	releaseTrack := "stable"
-	
+
 	prefsOut, err := exec.Command("tailscale", "debug", "prefs").Output()
 	if err == nil {
 		var prefs map[string]interface{}
-		if json.Unmarshal(prefsOut, &prefs) == nil {
+		if err := json.Unmarshal(prefsOut, &prefs); err == nil {
 			if au, ok := prefs["AutoUpdate"].(map[string]interface{}); ok {
 				if check, ok := au["Check"].(bool); ok {
 					autoUpdate = check

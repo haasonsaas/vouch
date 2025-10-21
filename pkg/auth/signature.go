@@ -70,7 +70,9 @@ func buildMessage(timestamp time.Time, nonce string, body []byte) []byte {
 
 func generateNonce() string {
 	b := make([]byte, 16)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		return ""
+	}
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
