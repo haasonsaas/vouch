@@ -9,8 +9,8 @@ import (
 )
 
 type SecureBootPosture struct {
-	SecureBootEnabled bool `json:"secure_boot_enabled"`
-	TPMPresent        bool `json:"tpm_present"`
+	SecureBootEnabled bool   `json:"secure_boot_enabled"`
+	TPMPresent        bool   `json:"tpm_present"`
 	TPMVersion        string `json:"tpm_version,omitempty"`
 }
 

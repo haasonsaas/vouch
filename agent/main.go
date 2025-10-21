@@ -276,7 +276,10 @@ func (a *Agent) enroll() error {
 		return err
 	}
 
-	tsPosture, _ := posture.CollectTailscalePosture(a.config.Checks.Tailscale.LocalAPISocket)
+	tsPosture, err := posture.CollectTailscalePosture(a.config.Checks.Tailscale.LocalAPISocket)
+	if err != nil {
+		span.RecordError(err)
+	}
 	nodeID := tsPosture.NodeID
 	if nodeID == "" || nodeID == "unknown" {
 		err := fmt.Errorf("could not determine Tailscale node ID")
@@ -284,7 +287,11 @@ func (a *Agent) enroll() error {
 		return err
 	}
 
-	hostname, _ := os.Hostname()
+	hostname, err := os.Hostname()
+	if err != nil {
+		span.RecordError(err)
+		return err
+	}
 
 	enrollToken := a.config.Server.EnrollToken
 	if enrollToken == "" {
@@ -311,7 +318,11 @@ func (a *Agent) enroll() error {
 		OSInfo:       runtime.GOOS + "/" + runtime.GOARCH,
 	}
 
-	data, _ := json.Marshal(enrollReq)
+	data, err := json.Marshal(enrollReq)
+	if err != nil {
+		span.RecordError(err)
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.config.Server.URL+"/v1/enroll", bytes.NewBuffer(data))
 	if err != nil {
 		span.RecordError(err)
@@ -331,10 +342,15 @@ func (a *Agent) enroll() error {
 
 	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			span.RecordError(readErr)
+		}
 		err := fmt.Errorf("enrollment failed: status %d", resp.StatusCode)
 		span.RecordError(err)
-		span.SetAttributes(attribute.String("http.response.body", strings.TrimSpace(string(body))))
+		if len(body) > 0 {
+			span.SetAttributes(attribute.String("http.response.body", strings.TrimSpace(string(body))))
+		}
 		return err
 	}
 
@@ -418,10 +434,19 @@ func (a *Agent) reportPosture() {
 	defer span.End()
 
 	report := a.collectComprehensivePosture()
-	data, _ := json.Marshal(report)
+	data, err := json.Marshal(report)
+	if err != nil {
+		span.RecordError(err)
+		return
+	}
 	signedReq := auth.CreateSignedRequest(a.identity, data)
 
-	req, _ := http.NewRequest("POST", a.config.Server.URL+"/v1/report", bytes.NewBuffer(signedReq.Body))
+	req, err := http.NewRequest("POST", a.config.Server.URL+"/v1/report", bytes.NewBuffer(signedReq.Body))
+	if err != nil {
+		span.RecordError(err)
+		log.Error().Err(err).Msg("Failed to build report request")
+		return
+	}
 	req = req.WithContext(ctx)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Vouch-Agent-ID", a.identity.AgentID)
@@ -454,11 +479,19 @@ func (a *Agent) reportPosture() {
 
 	span.SetAttributes(attribute.Int("http.status_code", resp.StatusCode))
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
+		data, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			span.RecordError(readErr)
+		}
 		err := fmt.Errorf("report failed: %d", resp.StatusCode)
 		span.RecordError(err)
-		span.SetAttributes(attribute.String("http.response.body", strings.TrimSpace(string(data))))
-		log.Error().Int("status", resp.StatusCode).Bytes("body", data).Msg("Server returned non-OK status")
+		if len(data) > 0 {
+			trimmed := strings.TrimSpace(string(data))
+			span.SetAttributes(attribute.String("http.response.body", trimmed))
+			log.Error().Int("status", resp.StatusCode).Str("body", trimmed).Msg("Server returned non-OK status")
+		} else {
+			log.Error().Int("status", resp.StatusCode).Msg("Server returned non-OK status")
+		}
 		return
 	}
 
@@ -500,9 +533,16 @@ func (a *Agent) collectComprehensivePosture() map[string]interface{} {
 	reportV2 := collector.Collect(ctx)
 
 	// Convert to map for JSON marshaling
-	data, _ := json.Marshal(reportV2)
+	data, err := json.Marshal(reportV2)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to marshal posture report")
+		return map[string]interface{}{}
+	}
 	var report map[string]interface{}
-	json.Unmarshal(data, &report)
+	if err := json.Unmarshal(data, &report); err != nil {
+		log.Error().Err(err).Msg("Failed to unmarshal posture into map")
+		return map[string]interface{}{}
+	}
 
 	// Add agent metadata
 	report["agent_version"] = Version
@@ -598,7 +638,10 @@ func (a *Agent) requestRotationChallenge() (*rotationChallenge, error) {
 	case http.StatusTooManyRequests:
 		return nil, fmt.Errorf("rotation challenge rate limited")
 	default:
-		data, _ := io.ReadAll(resp.Body)
+		data, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("challenge request failed: %d", resp.StatusCode)
+		}
 		return nil, fmt.Errorf("challenge request failed: %d %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 }
@@ -627,7 +670,10 @@ func (a *Agent) submitRotation(body []byte) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		data, _ := io.ReadAll(resp.Body)
+		data, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("rotate failed: %d", resp.StatusCode)
+		}
 		return fmt.Errorf("rotate failed: %d %s", resp.StatusCode, strings.TrimSpace(string(data)))
 	}
 
@@ -664,7 +710,9 @@ func (a *Agent) persistIdentity(newID *auth.Identity) error {
 
 	if err := newID.Save(a.keyPath); err != nil {
 		if _, restoreErr := os.Stat(backup); restoreErr == nil {
-			_ = os.Rename(backup, a.keyPath)
+			if renameErr := os.Rename(backup, a.keyPath); renameErr != nil {
+				return errors.Join(err, renameErr)
+			}
 		}
 		return err
 	}

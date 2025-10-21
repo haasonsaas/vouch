@@ -51,7 +51,7 @@ func statusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
 		Short: "Show overall compliance status",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			devices, err := fetchDevices()
 			if err != nil {
 				return err
@@ -81,7 +81,7 @@ func devicesCmd() *cobra.Command {
 		Use:     "devices",
 		Aliases: []string{"ls", "list"},
 		Short:   "List all devices",
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, _ []string) error {
 			devices, err := fetchDevices()
 			if err != nil {
 				return err
@@ -111,7 +111,7 @@ func deviceCmd() *cobra.Command {
 		Use:   "device [hostname]",
 		Short: "Show details for a specific device",
 		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(_ *cobra.Command, args []string) error {
 			hostname := args[0]
 			device, err := fetchDevice(hostname)
 			if err != nil {
@@ -134,7 +134,7 @@ func versionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Show version information",
-		Run: func(cmd *cobra.Command, args []string) {
+		Run: func(_ *cobra.Command, _ []string) {
 			fmt.Printf("vouch version %s\n", Version)
 		},
 	}

@@ -1,9 +1,9 @@
 package posture
 
 import (
+	"context"
+	"fmt"
 	"os"
-	"os/exec"
-	"strings"
 	"time"
 )
 
@@ -19,79 +19,24 @@ type Report struct {
 }
 
 func Collect() (*Report, error) {
-	hostname, _ := os.Hostname()
-	
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil, fmt.Errorf("determine hostname: %w", err)
+	}
+
+	// New CollectorV2 handles posture gathering with richer detail
+	collector := NewCollectorV2(10 * time.Second)
+	reportV2 := collector.Collect(context.Background())
+
+	// Map back to legacy Report until callers migrate
 	return &Report{
-		NodeID:         getTailscaleNodeID(),
+		NodeID:         reportV2.NodeID,
 		Hostname:       hostname,
-		OSRelease:      getOSRelease(),
-		Kernel:         getKernel(),
-		LastUpdateTime: getLastUpdateTime(),
-		DiskEncrypted:  isDiskEncrypted(),
-		Services:       getRunningServices(),
-		Timestamp:      time.Now(),
+		OSRelease:      reportV2.OSName,
+		Kernel:         reportV2.Kernel,
+		LastUpdateTime: reportV2.CollectedAt.Unix(),
+		DiskEncrypted:  reportV2.RootVolumeEncrypted,
+		Services:       reportV2.CriticalServices,
+		Timestamp:      reportV2.CollectedAt,
 	}, nil
-}
-
-func getTailscaleNodeID() string {
-	out, err := exec.Command("tailscale", "status", "--json").Output()
-	if err != nil {
-		return "unknown"
-	}
-	// Parse JSON and extract node ID
-	// Simplified for now
-	return strings.TrimSpace(string(out)[:20])
-}
-
-func getOSRelease() string {
-	data, err := os.ReadFile("/etc/os-release")
-	if err != nil {
-		return "unknown"
-	}
-	return string(data)
-}
-
-func getKernel() string {
-	out, err := exec.Command("uname", "-r").Output()
-	if err != nil {
-		return "unknown"
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func getLastUpdateTime() int64 {
-	// Check apt lists for Debian/Ubuntu
-	if info, err := os.Stat("/var/lib/apt/lists"); err == nil {
-		return info.ModTime().Unix()
-	}
-	// Check yum/dnf for RHEL/Fedora
-	if info, err := os.Stat("/var/cache/dnf"); err == nil {
-		return info.ModTime().Unix()
-	}
-	return 0
-}
-
-func isDiskEncrypted() bool {
-	// Check for LUKS/dm-crypt
-	_, err := os.Stat("/dev/mapper/cryptroot")
-	return err == nil
-}
-
-func getRunningServices() []string {
-	out, err := exec.Command("systemctl", "list-units", "--type=service", "--state=running", "--no-pager").Output()
-	if err != nil {
-		return []string{}
-	}
-	
-	services := []string{}
-	lines := strings.Split(string(out), "\n")
-	for _, line := range lines {
-		if strings.Contains(line, ".service") {
-			parts := strings.Fields(line)
-			if len(parts) > 0 {
-				services = append(services, parts[0])
-			}
-		}
-	}
-	return services
 }

@@ -14,7 +14,7 @@ type TailscalePosture struct {
 	Online         bool   `json:"online"`
 }
 
-func CollectTailscalePosture(localAPISocket string) (*TailscalePosture, error) {
+func CollectTailscalePosture(_ string) (*TailscalePosture, error) {
 	// Try using tailscale CLI status
 	out, err := exec.Command("tailscale", "status", "--json").Output()
 	if err != nil {

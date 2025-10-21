@@ -9,13 +9,13 @@ import (
 
 func TestBackoffWithJitterBounds(t *testing.T) {
 	initial := 100 * time.Millisecond
-	max := 800 * time.Millisecond
+	maxDelay := 800 * time.Millisecond
 	for attempt := 0; attempt < 6; attempt++ {
-		delay := backoffWithJitter(initial, max, attempt)
+		delay := backoffWithJitter(initial, maxDelay, attempt)
 		if delay < initial/2 {
 			t.Fatalf("delay below jitter floor: %v", delay)
 		}
-		if delay > max {
+		if delay > maxDelay {
 			t.Fatalf("delay exceeded max: %v", delay)
 		}
 	}

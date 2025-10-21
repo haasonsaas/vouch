@@ -43,14 +43,14 @@ func checkRule(report *posture.Report, rule Rule) bool {
 	case "update_age_days < 30":
 		age := time.Since(time.Unix(report.LastUpdateTime, 0)).Hours() / 24
 		return age < 30
-		
+
 	case "disk_encrypted == true":
 		return report.DiskEncrypted
-		
+
 	case "kernel_version >= 6.0":
 		// Simplified version check
 		return true
-		
+
 	default:
 		return true
 	}

@@ -54,10 +54,10 @@ func (r *retrier) do(fn func() error, retryable func(error) bool) error {
 	}
 }
 
-func backoffWithJitter(initial, max time.Duration, attempt int) time.Duration {
+func backoffWithJitter(initial, limit time.Duration, attempt int) time.Duration {
 	b := float64(initial) * math.Pow(2, float64(attempt))
-	if b > float64(max) {
-		b = float64(max)
+	if b > float64(limit) {
+		b = float64(limit)
 	}
 	j := b / 2
 	return time.Duration(j + rand.Float64()*j)

@@ -9,10 +9,10 @@ import (
 
 func TestEvaluate(t *testing.T) {
 	tests := []struct {
-		name       string
-		report     *posture.Report
-		policy     *Policy
-		wantPass   bool
+		name           string
+		report         *posture.Report
+		policy         *Policy
+		wantPass       bool
 		wantViolations int
 	}{
 		{

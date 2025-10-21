@@ -132,7 +132,7 @@ func TestCompleteRotation_UpdatesPublicKeyAndClearsRequirement(t *testing.T) {
 	require.Zero(t, count)
 }
 
-func signedRequest(t *testing.T, env rotationTestEnv, method, path string, body []byte) *http.Request {
+func signedRequest(_ *testing.T, env rotationTestEnv, method, path string, body []byte) *http.Request {
 	payload := body
 	if payload == nil {
 		payload = []byte("{}")

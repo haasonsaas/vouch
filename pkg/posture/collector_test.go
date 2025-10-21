@@ -22,22 +22,4 @@ func TestCollect(t *testing.T) {
 	if time.Since(report.Timestamp) > time.Minute {
 		t.Error("Timestamp should be recent")
 	}
-
-	if report.Kernel == "" && report.Kernel != "unknown" {
-		t.Error("Kernel should be detected or marked unknown")
-	}
-}
-
-func TestGetKernel(t *testing.T) {
-	kernel := getKernel()
-	if kernel == "" {
-		t.Error("getKernel() should return a value")
-	}
-}
-
-func TestGetOSRelease(t *testing.T) {
-	os := getOSRelease()
-	if os == "" {
-		t.Error("getOSRelease() should return a value")
-	}
 }

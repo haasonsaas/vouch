@@ -241,7 +241,7 @@ func (c *AgentConfig) Validate() error {
 		return ErrInvalidInterval
 	}
 	if !strings.HasPrefix(c.Server.URL, "https://") {
-		return &ConfigError{"server URL must be https"}
+		return &Error{"server URL must be https"}
 	}
 	if c.Server.RequestTimeout <= 0 {
 		c.Server.RequestTimeout = 10
@@ -266,14 +266,14 @@ func (c *AgentConfig) Validate() error {
 }
 
 var (
-	ErrMissingServerURL = &ConfigError{"server URL is required"}
-	ErrInvalidInterval  = &ConfigError{"reporting interval must be >= 10s"}
+	ErrMissingServerURL = &Error{"server URL is required"}
+	ErrInvalidInterval  = &Error{"reporting interval must be >= 10s"}
 )
 
-type ConfigError struct {
+type Error struct {
 	Message string
 }
 
-func (e *ConfigError) Error() string {
+func (e *Error) Error() string {
 	return e.Message
 }

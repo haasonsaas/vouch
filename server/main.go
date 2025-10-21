@@ -215,8 +215,18 @@ func (s *Server) handleReport(c *gin.Context) {
 	}
 
 	eval := policy.Evaluate(&report, s.policy)
-	violations, _ := json.Marshal(eval.Violations)
-	postureRaw, _ := json.Marshal(report)
+	violations, err := json.Marshal(eval.Violations)
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to marshal violations")
+		respondError(c, http.StatusInternalServerError, "failed to process report", s.logger)
+		return
+	}
+	postureRaw, err := json.Marshal(report)
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to marshal posture")
+		respondError(c, http.StatusInternalServerError, "failed to process report", s.logger)
+		return
+	}
 
 	device.Compliant = eval.Compliant
 	device.LastSeen = time.Now().UTC()

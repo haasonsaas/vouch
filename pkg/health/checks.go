@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-type HealthStatus struct {
+type Status struct {
 	ServerReachable    bool      `json:"server_reachable"`
 	TailscaledRunning  bool      `json:"tailscaled_running"`
 	TimeDrift          int       `json:"time_drift_seconds"`
@@ -18,8 +18,8 @@ type HealthStatus struct {
 	Issues             []string  `json:"issues,omitempty"`
 }
 
-func Check(serverURL string, maxTimeDrift int) *HealthStatus {
-	status := &HealthStatus{
+func Check(serverURL string, maxTimeDrift int) *Status {
+	status := &Status{
 		Healthy: true,
 		Issues:  []string{},
 	}
@@ -64,7 +64,7 @@ func Check(serverURL string, maxTimeDrift int) *HealthStatus {
 
 func checkTailscaled() bool {
 	if runtime.GOOS == "windows" {
-		out, err := exec.Command("powershell", "-Command", 
+		out, err := exec.Command("powershell", "-Command",
 			"Get-Service -Name Tailscale | Select-Object Status").Output()
 		if err != nil {
 			return false

@@ -94,8 +94,12 @@ func (c *CollectorV2) Collect(ctx context.Context) *ReportV2 {
 		Errors:      make(map[string]string),
 	}
 
-	hostname, _ := os.Hostname()
-	report.Hostname = hostname
+	hostname, err := os.Hostname()
+	if err != nil {
+		c.recordError("hostname", err.Error())
+	} else {
+		report.Hostname = hostname
+	}
 
 	// Run probes in parallel
 	var wg sync.WaitGroup
@@ -525,14 +529,23 @@ func probeSentinelOneMac(ctx context.Context, r *ReportV2, c *CollectorV2) {
 }
 
 func probeSentinelOneWindows(ctx context.Context, r *ReportV2, c *CollectorV2) {
-	if out, err := commandRunner(ctx, "powershell", "-Command", "Get-Service -Name 'Sentinel Agent' -ErrorAction SilentlyContinue"); err == nil && len(out) > 0 {
-		r.SentinelOneInstalled = true
-		if statusOut, err := commandRunner(ctx, "powershell", "-Command", "(Get-Service -Name 'Sentinel Agent').Status"); err == nil {
-			r.SentinelOneHealthy = strings.Contains(string(statusOut), "Running")
+	out, err := commandRunner(ctx, "powershell", "-Command", "Get-Service -Name 'Sentinel Agent' -ErrorAction SilentlyContinue")
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && len(exitErr.Stderr) == 0 {
+			return
 		}
-		if versionOut, err := commandRunner(ctx, "powershell", "-Command", "(Get-ChildItem 'C:/Program Files/SentinelOne' -Directory | Select-Object -First 1 | Get-ChildItem -Filter 'SentinelAgent.exe' -Recurse | Select-Object -First 1).VersionInfo.ProductVersion"); err == nil {
-			r.SentinelOneVersion = strings.TrimSpace(string(versionOut))
-		}
+		c.recordError("sentinelone", err.Error())
+		return
+	}
+	if len(out) == 0 {
+		return
+	}
+	r.SentinelOneInstalled = true
+	if statusOut, err := commandRunner(ctx, "powershell", "-Command", "(Get-Service -Name 'Sentinel Agent').Status"); err == nil {
+		r.SentinelOneHealthy = strings.Contains(string(statusOut), "Running")
+	}
+	if versionOut, err := commandRunner(ctx, "powershell", "-Command", "(Get-ChildItem 'C:/Program Files/SentinelOne' -Directory | Select-Object -First 1 | Get-ChildItem -Filter 'SentinelAgent.exe' -Recurse | Select-Object -First 1).VersionInfo.ProductVersion"); err == nil {
+		r.SentinelOneVersion = strings.TrimSpace(string(versionOut))
 	}
 }
 
@@ -565,7 +578,7 @@ func probeCrowdStrikeMac(ctx context.Context, r *ReportV2, c *CollectorV2) {
 	}
 }
 
-func probeCrowdStrikeWindows(ctx context.Context, r *ReportV2, c *CollectorV2) {
+func probeCrowdStrikeWindows(ctx context.Context, r *ReportV2, _ *CollectorV2) {
 	if out, err := commandRunner(ctx, "powershell", "-Command", "Get-Service -Name 'CSFalconService' -ErrorAction SilentlyContinue"); err == nil && len(out) > 0 {
 		r.CrowdStrikeInstalled = true
 		if statusOut, err := commandRunner(ctx, "powershell", "-Command", "(Get-Service -Name 'CSFalconService').Status"); err == nil {
@@ -619,11 +632,4 @@ func (c *CollectorV2) probeEDR(ctx context.Context, r *ReportV2) {
 func execWithTimeout(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	return cmd.CombinedOutput()
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

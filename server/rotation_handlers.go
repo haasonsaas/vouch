@@ -91,7 +91,16 @@ func (s *Server) requireAuthenticatedAgent(c *gin.Context) {
 
 func (s *Server) issueRotationChallenge(c *gin.Context) {
 	metricRotationRequests.Add(1)
-	device := c.MustGet("device").(*DeviceState)
+	val, exists := c.Get("device")
+	if !exists {
+		respondError(c, http.StatusUnauthorized, "device not in context", s.logger)
+		return
+	}
+	device, ok := val.(*DeviceState)
+	if !ok {
+		respondError(c, http.StatusInternalServerError, "invalid device context", s.logger)
+		return
+	}
 	logger := requestLogger(c, s.logger)
 	now := time.Now().UTC()
 	force := c.Query("force") == "true"
@@ -152,7 +161,16 @@ func (s *Server) issueRotationChallenge(c *gin.Context) {
 
 func (s *Server) completeRotation(c *gin.Context) {
 	metricRotationRequests.Add(1)
-	device := c.MustGet("device").(*DeviceState)
+	val, exists := c.Get("device")
+	if !exists {
+		respondError(c, http.StatusUnauthorized, "device not in context", s.logger)
+		return
+	}
+	device, ok := val.(*DeviceState)
+	if !ok {
+		respondError(c, http.StatusInternalServerError, "invalid device context", s.logger)
+		return
+	}
 	logger := requestLogger(c, s.logger)
 
 	var req struct {

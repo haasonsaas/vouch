@@ -4,15 +4,16 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
 
 type UpdatesPosture struct {
-	AutoUpdateEnabled bool      `json:"auto_update_enabled"`
-	LastUpdateTime    time.Time `json:"last_update_time"`
-	UpdatesOutstanding int      `json:"updates_outstanding"`
-	RebootPending     bool      `json:"reboot_pending"`
+	AutoUpdateEnabled  bool      `json:"auto_update_enabled"`
+	LastUpdateTime     time.Time `json:"last_update_time"`
+	UpdatesOutstanding int       `json:"updates_outstanding"`
+	RebootPending      bool      `json:"reboot_pending"`
 }
 
 func CollectUpdatesPosture() (*UpdatesPosture, error) {
@@ -81,24 +82,30 @@ func collectWindowsUpdates() (*UpdatesPosture, error) {
 	if err == nil {
 		// Parse time from output
 		timeStr := strings.TrimSpace(string(out))
-		if t, err := time.Parse("1/2/2006 12:00:00 AM", timeStr); err == nil {
+		if t, err := time.Parse("1/2/2006 3:04:05 PM", timeStr); err == nil {
+			posture.LastUpdateTime = t
+		} else if t, err := time.Parse("1/2/2006", timeStr); err == nil {
 			posture.LastUpdateTime = t
 		}
 	}
 
 	// Check for pending updates
-	out, err = exec.Command("powershell", "-Command",
+	updatesOutput, err := exec.Command("powershell", "-Command",
 		"(New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher().GetTotalHistoryCount()").Output()
 	if err == nil {
-		// Simplified - would need more robust update checking
-		posture.UpdatesOutstanding = 0
+		countStr := strings.TrimSpace(string(updatesOutput))
+		if count, parseErr := strconv.Atoi(countStr); parseErr == nil {
+			posture.UpdatesOutstanding = count
+		} else {
+			posture.UpdatesOutstanding = 0
+		}
 	}
 
 	// Check for pending reboot
-	out, err = exec.Command("powershell", "-Command",
+	rebootStatus, err := exec.Command("powershell", "-Command",
 		"Test-Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update\\RebootRequired'").Output()
 	if err == nil {
-		posture.RebootPending = strings.Contains(string(out), "True")
+		posture.RebootPending = strings.Contains(string(rebootStatus), "True")
 	}
 
 	return posture, nil

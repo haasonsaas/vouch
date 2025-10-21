@@ -8,9 +8,9 @@ import (
 )
 
 type FirewallPosture struct {
-	Enabled        bool   `json:"enabled"`
-	Type           string `json:"type"` // ufw, iptables, nftables, windows-defender
-	DefaultPolicy  string `json:"default_policy"`
+	Enabled        bool     `json:"enabled"`
+	Type           string   `json:"type"` // ufw, iptables, nftables, windows-defender
+	DefaultPolicy  string   `json:"default_policy"`
 	ActiveProfiles []string `json:"active_profiles,omitempty"` // Windows
 }
 
@@ -64,7 +64,7 @@ func collectLinuxFirewall(prefer string) (*FirewallPosture, error) {
 
 func collectWindowsFirewall() (*FirewallPosture, error) {
 	// PowerShell: Get-NetFirewallProfile
-	out, err := exec.Command("powershell", "-Command", 
+	out, err := exec.Command("powershell", "-Command",
 		"Get-NetFirewallProfile | Select-Object Name,Enabled | ConvertTo-Json").Output()
 	if err != nil {
 		return &FirewallPosture{Enabled: false, Type: "windows-defender"}, nil
@@ -74,7 +74,7 @@ func collectWindowsFirewall() (*FirewallPosture, error) {
 		Name    string
 		Enabled bool
 	}
-	
+
 	if err := json.Unmarshal(out, &profiles); err != nil {
 		return &FirewallPosture{Enabled: false, Type: "windows-defender"}, nil
 	}

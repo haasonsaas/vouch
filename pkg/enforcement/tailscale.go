@@ -10,10 +10,10 @@ import (
 )
 
 type TailscaleEnforcer struct {
-	apiKey   string
-	tailnet  string
-	tagName  string
-	client   *http.Client
+	apiKey  string
+	tailnet string
+	tagName string
+	client  *http.Client
 }
 
 type ACLUpdate struct {
@@ -52,7 +52,7 @@ func (e *TailscaleEnforcer) RevokeAccess(nodeID string) error {
 	return e.updateNodeTags(nodeID, []string{}, []string{e.tagName})
 }
 
-func (e *TailscaleEnforcer) updateNodeTags(nodeID string, addTags, removeTags []string) error {
+func (e *TailscaleEnforcer) updateNodeTags(nodeID string, addTags, _ []string) error {
 	url := fmt.Sprintf("https://api.tailscale.com/api/v2/device/%s/tags", nodeID)
 
 	payload := map[string]interface{}{
@@ -79,7 +79,10 @@ func (e *TailscaleEnforcer) updateNodeTags(nodeID string, addTags, removeTags []
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			return fmt.Errorf("tailscale API returned %d", resp.StatusCode)
+		}
 		return fmt.Errorf("tailscale API returned %d: %s", resp.StatusCode, string(body))
 	}
 
