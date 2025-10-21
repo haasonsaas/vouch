@@ -198,13 +198,13 @@ func main() {
 	srv.registerKeyRotationRoutes(r)
 	r.GET("/v1/devices", srv.listDevices)
 	r.GET("/v1/devices/:hostname", srv.getDevice)
-	
+
 	// External API for Keep integration (with API key auth)
 	if srv.enableExternalQuery {
 		r.GET("/v1/external/devices/:identifier", srv.requireAPIKey, srv.getDeviceExternal)
 		log.Info().Msg("External device query API enabled")
 	}
-	
+
 	r.POST("/v1/enforce/:hostname", srv.manualEnforce)
 	r.GET("/v1/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "healthy", "version": Version})
@@ -479,9 +479,9 @@ func (s *Server) requireAPIKey(c *gin.Context) {
 func (s *Server) getDeviceExternal(c *gin.Context) {
 	identifier := c.Param("identifier")
 	format := c.DefaultQuery("format", "standard")
-	
+
 	var device DeviceState
-	
+
 	// Try different lookup strategies
 	query := s.db.Where("hostname = ? OR node_id = ? OR agent_id = ?", identifier, identifier, identifier)
 	if err := query.First(&device).Error; err != nil {
@@ -514,12 +514,12 @@ func (s *Server) getDeviceExternal(c *gin.Context) {
 
 	if format == "keep" {
 		keepDevice := s.transformToKeepFormat(&device)
-		
+
 		// Add cache headers
 		c.Header("Cache-Control", "private, max-age=300")
 		c.Header("X-Vouch-Cache-TTL", "300")
 		c.Header("X-Vouch-Data-Age", fmt.Sprintf("%.0f", time.Since(device.LastSeen).Seconds()))
-		
+
 		c.JSON(http.StatusOK, keepDevice)
 	} else {
 		// Standard format - return full DeviceState with parsed posture
@@ -548,7 +548,7 @@ func (s *Server) transformToKeepFormat(device *DeviceState) *KeepDevicePosture {
 
 	// Calculate trust score
 	trustScore := s.calculateTrustScore(&postureData, violations)
-	
+
 	// Determine posture status
 	postureStatus := s.determinePostureStatus(device.Compliant, trustScore, device.LastSeen)
 
@@ -568,7 +568,7 @@ func (s *Server) transformToKeepFormat(device *DeviceState) *KeepDevicePosture {
 		attributes["tpm_present"] = postureData.TPMPresent
 		attributes["tailscale_online"] = postureData.TailscaleOnline
 		attributes["tailscale_version"] = postureData.TailscaleVersion
-		
+
 		// EDR detection
 		if postureData.SentinelOneInstalled {
 			attributes["edr_healthy"] = postureData.SentinelOneHealthy
@@ -576,12 +576,12 @@ func (s *Server) transformToKeepFormat(device *DeviceState) *KeepDevicePosture {
 			attributes["edr_version"] = postureData.SentinelOneVersion
 		} else if postureData.CrowdStrikeInstalled {
 			attributes["edr_healthy"] = postureData.CrowdStrikeHealthy
-			attributes["edr_vendor"] = "crowdstrike" 
+			attributes["edr_vendor"] = "crowdstrike"
 			attributes["edr_version"] = postureData.CrowdStrikeVersion
 		} else {
 			attributes["edr_healthy"] = false
 		}
-		
+
 		if postureData.LastUpdateTime != nil {
 			attributes["last_update_check"] = *postureData.LastUpdateTime
 		}
@@ -656,19 +656,19 @@ func (s *Server) calculateTrustScore(posture *posture.ReportV2, violations []str
 // determinePostureStatus maps compliance and trust score to posture status
 func (s *Server) determinePostureStatus(compliant bool, trustScore int, lastSeen time.Time) string {
 	timeSinceLastSeen := time.Since(lastSeen)
-	
+
 	if timeSinceLastSeen > 24*time.Hour {
 		return "unknown"
 	}
-	
+
 	if timeSinceLastSeen > 10*time.Minute {
 		return "degraded"
 	}
-	
+
 	if compliant && trustScore >= 70 {
 		return "healthy"
 	}
-	
+
 	return "degraded"
 }
 
@@ -701,9 +701,9 @@ func (s *Server) transformToStandardFormat(device *DeviceState) map[string]inter
 			"policy_version": "v1.0.0",
 		},
 		"metadata": map[string]interface{}{
-			"enrolled_at":        device.CreatedAt,
-			"last_key_rotation":  nil, // TODO: implement if needed
-			"agent_version":      "unknown", // TODO: track agent version
+			"enrolled_at":       device.CreatedAt,
+			"last_key_rotation": nil,       // TODO: implement if needed
+			"agent_version":     "unknown", // TODO: track agent version
 		},
 	}
 }
