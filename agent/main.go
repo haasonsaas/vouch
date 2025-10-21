@@ -12,6 +12,7 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -30,19 +31,21 @@ import (
 )
 
 var (
-	configPath  = flag.String("config", "/etc/vouch/agent.yaml", "Config file path")
-	serverURL   = flag.String("server", "", "Vouch server URL (overrides config)")
-	interval    = flag.Duration("interval", 0, "Report interval (overrides config)")
-	enrollToken = flag.String("enroll", "", "One-time enrollment token")
-	Version     = "dev"
+	configPath      = flag.String("config", "/etc/vouch/agent.yaml", "Config file path")
+	enrollTokenPath = flag.String("enroll-token-file", "", "Path to one-time enrollment token")
+	serverURL       = flag.String("server", "", "Vouch server URL (overrides config)")
+	interval        = flag.Duration("interval", 0, "Report interval (overrides config)")
+	enrollToken     = flag.String("enroll", "", "One-time enrollment token")
+	Version         = "dev"
 )
 
 type Agent struct {
-	config   *config.AgentConfig
-	identity *auth.Identity
-	client   *http.Client
-	keyPath  string
-	retrier  *retrier
+	config     *config.AgentConfig
+	configPath string
+	identity   *auth.Identity
+	client     *http.Client
+	keyPath    string
+	retrier    *retrier
 }
 
 func main() {
@@ -66,6 +69,9 @@ func main() {
 	}
 	if *enrollToken != "" {
 		cfg.Server.EnrollToken = *enrollToken
+	}
+	if *enrollTokenPath != "" {
+		cfg.Server.EnrollTokenFile = *enrollTokenPath
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -109,10 +115,11 @@ func main() {
 	}
 
 	agent := &Agent{
-		config:  cfg,
-		client:  &http.Client{Timeout: time.Duration(cfg.Server.RequestTimeout) * time.Second},
-		keyPath: cfg.Auth.KeyPath,
-		retrier: newRetrier(cfg.Server.RetryInitialMs, cfg.Server.RetryMaxMs, cfg.Server.RetryMaxRetries),
+		config:     cfg,
+		configPath: *configPath,
+		client:     &http.Client{Timeout: time.Duration(cfg.Server.RequestTimeout) * time.Second},
+		keyPath:    cfg.Auth.KeyPath,
+		retrier:    newRetrier(cfg.Server.RetryInitialMs, cfg.Server.RetryMaxMs, cfg.Server.RetryMaxRetries),
 	}
 
 	// Load or enroll identity
@@ -203,12 +210,60 @@ func (a *Agent) loadOrEnroll() error {
 	}
 
 	// Need to enroll
-	if a.config.Server.EnrollToken == "" {
+	token, err := a.consumeEnrollmentToken()
+	if err != nil {
+		return err
+	}
+	if token == "" {
 		return fmt.Errorf("no existing identity and no enrollment token provided")
 	}
 
+	a.config.Server.EnrollToken = token
+
 	log.Info().Msg("Enrolling new agent")
 	return a.enroll()
+}
+
+func (a *Agent) consumeEnrollmentToken() (string, error) {
+	if a.config.Server.EnrollToken != "" {
+		token := a.config.Server.EnrollToken
+		a.config.Server.EnrollToken = ""
+		return token, nil
+	}
+	if a.config.Server.EnrollTokenFile != "" {
+		token, err := readTokenFile(a.config.Server.EnrollTokenFile)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if token != "" {
+			return token, nil
+		}
+	}
+	if token := strings.TrimSpace(os.Getenv("VOUCH_ENROLL_TOKEN")); token != "" {
+		return token, nil
+	}
+	if path := strings.TrimSpace(os.Getenv("VOUCH_ENROLL_TOKEN_FILE")); path != "" {
+		token, err := readTokenFile(path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if token != "" {
+			return token, nil
+		}
+	}
+	if a.configPath != "" {
+		tokenPath := resolveTokenPath(a.configPath)
+		if tokenPath != "" {
+			token, err := readTokenFile(tokenPath)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return "", err
+			}
+			if token != "" {
+				return token, nil
+			}
+		}
+	}
+	return "", nil
 }
 
 func (a *Agent) enroll() error {
@@ -231,8 +286,25 @@ func (a *Agent) enroll() error {
 
 	hostname, _ := os.Hostname()
 
+	enrollToken := a.config.Server.EnrollToken
+	if enrollToken == "" {
+		var readErr error
+		enrollToken, readErr = a.consumeEnrollmentToken()
+		if readErr != nil {
+			span.RecordError(readErr)
+			return readErr
+		}
+		if enrollToken == "" {
+			err := errors.New("enrollment token unavailable")
+			span.RecordError(err)
+			return err
+		}
+	}
+
+	a.config.Server.EnrollToken = enrollToken
+
 	enrollReq := auth.EnrollmentRequest{
-		Token:        a.config.Server.EnrollToken,
+		Token:        enrollToken,
 		NodeID:       nodeID,
 		Hostname:     hostname,
 		PublicKeyB64: identity.PublicKeyB64(),
@@ -288,7 +360,57 @@ func (a *Agent) enroll() error {
 		}
 	}
 
+	if err := a.clearEnrollmentToken(); err != nil {
+		log.Warn().Err(err).Msg("Failed to clear enrollment token after successful enrollment")
+	}
+
 	return nil
+}
+
+func (a *Agent) clearEnrollmentToken() error {
+	if a.config.Server.EnrollTokenFile != "" {
+		if err := os.Remove(a.config.Server.EnrollTokenFile); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	if path := strings.TrimSpace(os.Getenv("VOUCH_ENROLL_TOKEN_FILE")); path != "" {
+		if err := os.Remove(path); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	if tokenPath := resolveTokenPath(a.configPath); tokenPath != "" {
+		if err := os.Remove(tokenPath); err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	a.config.Server.EnrollToken = ""
+	return nil
+}
+
+func readTokenFile(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(data)), nil
+}
+
+func resolveTokenPath(configPath string) string {
+	if configPath == "" {
+		return ""
+	}
+	base := filepath.Dir(configPath)
+	defaultPath := filepath.Join(base, "enroll.token")
+	if _, err := os.Stat(defaultPath); err == nil {
+		return defaultPath
+	}
+	return ""
 }
 
 func (a *Agent) reportPosture() {

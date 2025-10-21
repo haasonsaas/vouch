@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -21,6 +22,7 @@ type AgentConfig struct {
 type ServerConfig struct {
 	URL             string `yaml:"url"`
 	EnrollToken     string `yaml:"enroll_token"`
+	EnrollTokenFile string `yaml:"enroll_token_file"`
 	RequestTimeout  int    `yaml:"request_timeout_s"`
 	MetricsEndpoint string `yaml:"metrics_endpoint"`
 	RetryInitialMs  int    `yaml:"retry_initial_ms"`
@@ -205,11 +207,30 @@ func Load(path string) (*AgentConfig, error) {
 	if token := os.Getenv("VOUCH_ENROLL_TOKEN"); token != "" {
 		cfg.Server.EnrollToken = token
 	}
+	if tokenFile := os.Getenv("VOUCH_ENROLL_TOKEN_FILE"); tokenFile != "" {
+		cfg.Server.EnrollTokenFile = tokenFile
+	}
 	if level := os.Getenv("VOUCH_LOG_LEVEL"); level != "" {
 		cfg.Logging.Level = level
 	}
+	if cfg.Server.EnrollToken == "" && cfg.Server.EnrollTokenFile == "" {
+		if defaultPath := defaultTokenPath(path); defaultPath != "" {
+			cfg.Server.EnrollTokenFile = defaultPath
+		}
+	}
 
 	return cfg, nil
+}
+
+func defaultTokenPath(configPath string) string {
+	if configPath == "" {
+		return ""
+	}
+	dir := filepath.Dir(configPath)
+	if dir == "." || dir == "" {
+		dir = "."
+	}
+	return filepath.Join(dir, "enroll.token")
 }
 
 func (c *AgentConfig) Validate() error {
