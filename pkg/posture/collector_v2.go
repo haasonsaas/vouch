@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -45,9 +47,15 @@ type ReportV2 struct {
 	FirewallType    string `json:"firewall_type,omitempty"` // ufw, nftables, iptables, pf, windows-defender
 
 	// Security
-	SecureBootEnabled bool   `json:"secure_boot_enabled"`
-	TPMPresent        bool   `json:"tpm_present"`
-	TPMVersion        string `json:"tpm_version,omitempty"`
+	SecureBootEnabled    bool   `json:"secure_boot_enabled"`
+	TPMPresent           bool   `json:"tpm_present"`
+	TPMVersion           string `json:"tpm_version,omitempty"`
+	SentinelOneInstalled bool   `json:"sentinelone_installed"`
+	SentinelOneHealthy   bool   `json:"sentinelone_healthy"`
+	SentinelOneVersion   string `json:"sentinelone_version,omitempty"`
+	CrowdStrikeInstalled bool   `json:"crowdstrike_installed"`
+	CrowdStrikeHealthy   bool   `json:"crowdstrike_healthy"`
+	CrowdStrikeVersion   string `json:"crowdstrike_version,omitempty"`
 
 	// Services (top 10 most relevant)
 	CriticalServices []string `json:"critical_services,omitempty"`
@@ -102,6 +110,7 @@ func (c *CollectorV2) Collect(ctx context.Context) *ReportV2 {
 		{"tailscale", c.probeTailscale},
 		{"firewall", c.probeFirewall},
 		{"secure_boot", c.probeSecureBoot},
+		{"edr", c.probeEDR},
 		{"services", c.probeServices},
 	}
 
@@ -470,6 +479,139 @@ func (c *CollectorV2) probeServices(ctx context.Context, r *ReportV2) {
 		if err == nil && strings.TrimSpace(string(out)) == "active" {
 			r.CriticalServices = append(r.CriticalServices, svc)
 		}
+	}
+}
+
+var commandRunner = execWithTimeout
+
+func probeSentinelOneLinux(ctx context.Context, r *ReportV2, c *CollectorV2) {
+	if _, err := exec.LookPath("sentinelctl"); err == nil {
+		r.SentinelOneInstalled = true
+		if versionOut, err := commandRunner(ctx, "sentinelctl", "version"); err == nil {
+			r.SentinelOneVersion = parseSentinelOneVersion(string(versionOut))
+		} else {
+			c.recordError("sentinelone", err.Error())
+		}
+		if out, err := commandRunner(ctx, "systemctl", "is-active", "sentinelone-agent"); err == nil {
+			r.SentinelOneHealthy = strings.TrimSpace(string(out)) == "active"
+		}
+	}
+}
+
+func probeSentinelOneMac(ctx context.Context, r *ReportV2, c *CollectorV2) {
+	agentPath := "/Library/Sentinel/sentinel-agent.bundle"
+	if _, err := os.Stat(agentPath); err == nil {
+		r.SentinelOneInstalled = true
+		versionPath := filepath.Join(agentPath, "Contents", "Info.plist")
+		if data, err := os.ReadFile(versionPath); err == nil {
+			if ver := extractPlistVersion(string(data)); ver != "" {
+				r.SentinelOneVersion = ver
+			}
+		}
+		ctlPath := "/usr/bin/sentinelctl"
+		if _, err := os.Stat(ctlPath); err == nil {
+			if out, err := commandRunner(ctx, ctlPath, "status"); err == nil {
+				lower := strings.ToLower(string(out))
+				r.SentinelOneHealthy = strings.Contains(lower, "running") || strings.Contains(lower, "active")
+			} else {
+				c.recordError("sentinelone", err.Error())
+			}
+		} else {
+			if out, err := commandRunner(ctx, "launchctl", "list", "com.sentinelone.sentinel-agent"); err == nil {
+				r.SentinelOneHealthy = strings.Contains(strings.ToLower(string(out)), "running")
+			}
+		}
+	}
+}
+
+func probeSentinelOneWindows(ctx context.Context, r *ReportV2, c *CollectorV2) {
+	if out, err := commandRunner(ctx, "powershell", "-Command", "Get-Service -Name 'Sentinel Agent' -ErrorAction SilentlyContinue"); err == nil && len(out) > 0 {
+		r.SentinelOneInstalled = true
+		if statusOut, err := commandRunner(ctx, "powershell", "-Command", "(Get-Service -Name 'Sentinel Agent').Status"); err == nil {
+			r.SentinelOneHealthy = strings.Contains(string(statusOut), "Running")
+		}
+		if versionOut, err := commandRunner(ctx, "powershell", "-Command", "(Get-ChildItem 'C:/Program Files/SentinelOne' -Directory | Select-Object -First 1 | Get-ChildItem -Filter 'SentinelAgent.exe' -Recurse | Select-Object -First 1).VersionInfo.ProductVersion"); err == nil {
+			r.SentinelOneVersion = strings.TrimSpace(string(versionOut))
+		}
+	}
+}
+
+func probeCrowdStrikeLinux(ctx context.Context, r *ReportV2, c *CollectorV2) {
+	if _, err := exec.LookPath("falconctl"); err == nil {
+		r.CrowdStrikeInstalled = true
+		if out, err := commandRunner(ctx, "falconctl", "-g", "--version"); err == nil {
+			r.CrowdStrikeVersion = parseCrowdStrikeVersion(string(out))
+		} else {
+			c.recordError("crowdstrike", err.Error())
+		}
+		if out, err := commandRunner(ctx, "systemctl", "is-active", "falcon-sensor"); err == nil {
+			r.CrowdStrikeHealthy = strings.TrimSpace(string(out)) == "active"
+		}
+	}
+}
+
+func probeCrowdStrikeMac(ctx context.Context, r *ReportV2, c *CollectorV2) {
+	sensorPath := "/Library/CS/falconctl"
+	if _, err := os.Stat(sensorPath); err == nil {
+		r.CrowdStrikeInstalled = true
+		if out, err := commandRunner(ctx, sensorPath, "stats"); err == nil {
+			r.CrowdStrikeHealthy = strings.Contains(strings.ToLower(string(out)), "running")
+		} else {
+			c.recordError("crowdstrike", err.Error())
+		}
+		if out, err := commandRunner(ctx, sensorPath, "stats", "--version"); err == nil {
+			r.CrowdStrikeVersion = parseCrowdStrikeVersion(string(out))
+		}
+	}
+}
+
+func probeCrowdStrikeWindows(ctx context.Context, r *ReportV2, c *CollectorV2) {
+	if out, err := commandRunner(ctx, "powershell", "-Command", "Get-Service -Name 'CSFalconService' -ErrorAction SilentlyContinue"); err == nil && len(out) > 0 {
+		r.CrowdStrikeInstalled = true
+		if statusOut, err := commandRunner(ctx, "powershell", "-Command", "(Get-Service -Name 'CSFalconService').Status"); err == nil {
+			r.CrowdStrikeHealthy = strings.Contains(string(statusOut), "Running")
+		}
+		if versionOut, err := commandRunner(ctx, "powershell", "-Command", "(Get-ChildItem 'C:/Program Files/CrowdStrike/Falcon' -Filter 'CSFalconService.exe' -Recurse | Select-Object -First 1).VersionInfo.ProductVersion"); err == nil {
+			r.CrowdStrikeVersion = strings.TrimSpace(string(versionOut))
+		}
+	}
+}
+
+func parseSentinelOneVersion(output string) string {
+	re := regexp.MustCompile(`(?i)version[:\s]+([\w.\-]+)`)
+	if match := re.FindStringSubmatch(output); len(match) > 1 {
+		return match[1]
+	}
+	return strings.TrimSpace(output)
+}
+
+func parseCrowdStrikeVersion(output string) string {
+	re := regexp.MustCompile(`(?i)(version|sensor version)[:\s]+([\w.\-]+)`)
+	if match := re.FindStringSubmatch(output); len(match) > 2 {
+		return match[2]
+	}
+	return strings.TrimSpace(output)
+}
+
+func extractPlistVersion(plist string) string {
+	re := regexp.MustCompile(`<key>CFBundleShortVersionString</key>\s*<string>([^<]+)</string>`)
+	if match := re.FindStringSubmatch(plist); len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func (c *CollectorV2) probeEDR(ctx context.Context, r *ReportV2) {
+	switch runtime.GOOS {
+	case "linux":
+		probeSentinelOneLinux(ctx, r, c)
+		probeCrowdStrikeLinux(ctx, r, c)
+	case "darwin":
+		probeSentinelOneMac(ctx, r, c)
+		probeCrowdStrikeMac(ctx, r, c)
+	case "windows":
+		probeSentinelOneWindows(ctx, r, c)
+		probeCrowdStrikeWindows(ctx, r, c)
 	}
 }
 
