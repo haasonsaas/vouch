@@ -676,12 +676,12 @@ func (s *Server) determinePostureStatus(compliant bool, trustScore int, lastSeen
 func (s *Server) transformToStandardFormat(device *DeviceState) map[string]interface{} {
 	var postureData posture.ReportV2
 	if device.PostureRaw != "" {
-		json.Unmarshal([]byte(device.PostureRaw), &postureData)
+		_ = json.Unmarshal([]byte(device.PostureRaw), &postureData)
 	}
 
 	var violations []string
 	if device.Violations != "" && device.Violations != "null" {
-		json.Unmarshal([]byte(device.Violations), &violations)
+		_ = json.Unmarshal([]byte(device.Violations), &violations)
 	}
 
 	return map[string]interface{}{
