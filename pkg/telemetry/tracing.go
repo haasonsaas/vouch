@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -21,11 +22,11 @@ func SetupTracing(ctx context.Context, serviceName, serviceVersion, endpoint str
 	}
 
 	sampler := sdktrace.ParentBased(sdktrace.TraceIDRatioBased(sampleRatio))
-	res := resource.NewWithAttributes(
-		semconv.SchemaURL,
+	attrs := []attribute.KeyValue{
 		semconv.ServiceName(serviceName),
 		semconv.ServiceVersion(serviceVersion),
-	)
+	}
+	res := resource.NewWithAttributes(semconv.SchemaURL, attrs...)
 
 	opts := []sdktrace.TracerProviderOption{
 		sdktrace.WithSampler(sampler),
