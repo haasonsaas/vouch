@@ -15,7 +15,7 @@ import (
 
 // SetupTracing configures an OpenTelemetry tracer provider with optional OTLP exporter
 // and installs global propagators. Returns the provider so callers can shut it down.
-func SetupTracing(ctx context.Context, serviceName, serviceVersion, endpoint string, insecure bool, sampleRatio float64) (*sdktrace.TracerProvider, error) {
+func SetupTracing(ctx context.Context, serviceName, serviceVersion, endpoint string, insecure bool, sampleRatio float64, logSpans bool) (*sdktrace.TracerProvider, error) {
 	if sampleRatio <= 0 || sampleRatio > 1 {
 		sampleRatio = 1
 	}
@@ -56,6 +56,10 @@ func SetupTracing(ctx context.Context, serviceName, serviceVersion, endpoint str
 			return nil, err
 		}
 		opts = append(opts, sdktrace.WithBatcher(exporter))
+	}
+
+	if logSpans {
+		opts = append(opts, sdktrace.WithSpanProcessor(sdktrace.NewSimpleSpanProcessor(newLoggingExporter())))
 	}
 
 	provider := sdktrace.NewTracerProvider(opts...)

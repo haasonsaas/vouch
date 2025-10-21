@@ -106,6 +106,7 @@ type TracingConfig struct {
 	Endpoint    string  `yaml:"endpoint" json:"endpoint"`
 	Insecure    bool    `yaml:"insecure" json:"insecure"`
 	SampleRatio float64 `yaml:"sample_ratio" json:"sample_ratio"`
+	LogSpans    bool    `yaml:"log_spans" json:"log_spans"`
 }
 
 // DefaultConfig returns a config with sensible defaults
@@ -175,6 +176,7 @@ func DefaultConfig() *AgentConfig {
 			Endpoint:    "",
 			Insecure:    false,
 			SampleRatio: 1,
+			LogSpans:    false,
 		},
 	}
 }
@@ -238,6 +240,7 @@ func (c *AgentConfig) Validate() error {
 	if c.Tracing.SampleRatio <= 0 || c.Tracing.SampleRatio > 1 {
 		c.Tracing.SampleRatio = 1
 	}
+	// no extra validation for log spans; defaults already set
 	return nil
 }
 

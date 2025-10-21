@@ -87,8 +87,16 @@ func main() {
 			log.Warn().Str("value", raw).Msg("Invalid VOUCH_TRACE_SAMPLE_RATIO, defaulting to 1")
 		}
 	}
+	logSpans := false
+	if raw := os.Getenv("VOUCH_TRACE_LOG_SPANS"); raw != "" {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			logSpans = parsed
+		} else {
+			log.Warn().Str("value", raw).Msg("Invalid VOUCH_TRACE_LOG_SPANS, defaulting to false")
+		}
+	}
 
-	if tp, err := telemetry.SetupTracing(ctx, "vouch-server", Version, traceEndpoint, traceInsecure, sampleRatio); err != nil {
+	if tp, err := telemetry.SetupTracing(ctx, "vouch-server", Version, traceEndpoint, traceInsecure, sampleRatio, logSpans); err != nil {
 		log.Warn().Err(err).Msg("Tracing disabled")
 	} else if tp != nil {
 		defer func() {

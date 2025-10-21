@@ -7,7 +7,7 @@ import (
 
 func TestSetupTracingDefaults(t *testing.T) {
 	ctx := context.Background()
-	provider, err := SetupTracing(ctx, "vouch-server", "test", "", false, 0)
+	provider, err := SetupTracing(ctx, "vouch-server", "test", "", false, 0, false)
 	if err != nil {
 		t.Fatalf("setup tracing failed: %v", err)
 	}

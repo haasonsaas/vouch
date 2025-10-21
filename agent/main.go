@@ -91,8 +91,14 @@ func main() {
 			traceRatio = parsed
 		}
 	}
+	logSpans := cfg.Tracing.LogSpans
+	if raw := os.Getenv("VOUCH_AGENT_TRACE_LOG_SPANS"); raw != "" {
+		if parsed, err := strconv.ParseBool(raw); err == nil {
+			logSpans = parsed
+		}
+	}
 
-	if tp, err := telemetry.SetupTracing(ctx, "vouch-agent", Version, traceEndpoint, traceInsecure, traceRatio); err != nil {
+	if tp, err := telemetry.SetupTracing(ctx, "vouch-agent", Version, traceEndpoint, traceInsecure, traceRatio, logSpans); err != nil {
 		log.Warn().Err(err).Msg("Agent tracing disabled")
 	} else if tp != nil {
 		defer func() {
