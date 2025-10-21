@@ -22,7 +22,14 @@ Server evaluates posture against policies and optionally updates Tailscale ACL t
 # Binary
 wget https://github.com/haasonsaas/vouch/releases/latest/download/vouch-server-linux-amd64
 chmod +x vouch-server-linux-amd64
-./vouch-server-linux-amd64 --policy policies.yaml --listen :8080
+./vouch-server-linux-amd64 -policy policies.yaml -listen :8080
+
+# With external API for Keep integration
+./vouch-server-linux-amd64 \
+  -policy policies.yaml \
+  -listen :8080 \
+  -enable-external-query \
+  -external-api-key "vouch_ak_your_api_key"
 
 # Docker
 docker run -d -p 8080:8080 \
@@ -119,6 +126,10 @@ Body: {posture data}
 ```http
 GET /v1/devices
 GET /v1/devices/:hostname
+
+# External API (requires API key)
+GET /v1/external/devices/:identifier?format=keep
+Authorization: Bearer <api-key>
 ```
 
 ## CLI
