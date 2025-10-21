@@ -676,12 +676,16 @@ func (s *Server) determinePostureStatus(compliant bool, trustScore int, lastSeen
 func (s *Server) transformToStandardFormat(device *DeviceState) map[string]interface{} {
 	var postureData posture.ReportV2
 	if device.PostureRaw != "" {
-		_ = json.Unmarshal([]byte(device.PostureRaw), &postureData)
+		if err := json.Unmarshal([]byte(device.PostureRaw), &postureData); err != nil {
+			s.logger.Warn().Err(err).Str("agent_id", device.AgentID).Msg("Failed to parse posture data")
+		}
 	}
 
 	var violations []string
 	if device.Violations != "" && device.Violations != "null" {
-		_ = json.Unmarshal([]byte(device.Violations), &violations)
+		if err := json.Unmarshal([]byte(device.Violations), &violations); err != nil {
+			s.logger.Warn().Err(err).Str("agent_id", device.AgentID).Msg("Failed to parse violations")
+		}
 	}
 
 	return map[string]interface{}{
