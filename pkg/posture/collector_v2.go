@@ -27,10 +27,10 @@ type ReportV2 struct {
 	Kernel string `json:"kernel"`  // 6.8.0-47-generic
 
 	// Updates
-	LastUpdateTime     *time.Time `json:"last_update_time,omitempty"`
-	UpdatesOutstanding int        `json:"updates_outstanding"`
-	AutoUpdateEnabled  bool       `json:"auto_update_enabled"`
-	RebootPending      bool       `json:"reboot_pending"`
+	LastUpdateTime     *int64 `json:"last_update_time,omitempty"` // Unix timestamp
+	UpdatesOutstanding int    `json:"updates_outstanding"`
+	AutoUpdateEnabled  bool   `json:"auto_update_enabled"`
+	RebootPending      bool   `json:"reboot_pending"`
 
 	// Disk Encryption
 	RootVolumeEncrypted bool     `json:"root_volume_encrypted"`
@@ -223,8 +223,8 @@ func (c *CollectorV2) probeLinuxUpdates(ctx context.Context, r *ReportV2) {
 
 	for _, path := range paths {
 		if info, err := os.Stat(path); err == nil {
-			t := info.ModTime()
-			r.LastUpdateTime = &t
+			ts := info.ModTime().Unix()
+			r.LastUpdateTime = &ts
 			break
 		}
 	}
@@ -267,7 +267,8 @@ func (c *CollectorV2) probeWindowsUpdates(ctx context.Context, r *ReportV2) {
 		"(Get-HotFix | Sort-Object InstalledOn -Descending | Select-Object -First 1).InstalledOn")
 	if err == nil {
 		if t, err := time.Parse("1/2/2006", strings.TrimSpace(string(out))); err == nil {
-			r.LastUpdateTime = &t
+			ts := t.Unix()
+			r.LastUpdateTime = &ts
 		}
 	}
 
