@@ -417,11 +417,10 @@ func (c *CollectorV2) probeLinuxFirewall(ctx context.Context, r *ReportV2) {
 }
 
 func (c *CollectorV2) probeMacOSFirewall(ctx context.Context, r *ReportV2) {
-	out, err := execWithTimeout(ctx, "defaults", "read", "/Library/Preferences/com.apple.alf", "globalstate")
-	if err == nil {
-		state := strings.TrimSpace(string(out))
-		r.FirewallEnabled = (state == "1" || state == "2")
-		r.FirewallType = "pf"
+	out, err := execWithTimeout(ctx, "/usr/libexec/ApplicationFirewall/socketfilterfw", "--getglobalstate")
+	if err == nil && strings.Contains(string(out), "State = 1") {
+		r.FirewallEnabled = true
+		r.FirewallType = "application-firewall"
 	}
 }
 
