@@ -30,8 +30,11 @@ func Evaluate(report *posture.Report, policy *Policy) *Evaluation {
 
 	for _, rule := range policy.Rules {
 		if !checkRule(report, rule) {
-			eval.Compliant = false
 			eval.Violations = append(eval.Violations, rule.Name)
+			// Only mark non-compliant for deny rules, not warnings
+			if rule.Action == "deny" {
+				eval.Compliant = false
+			}
 		}
 	}
 
