@@ -14,6 +14,7 @@ type Report struct {
 	Kernel         string    `json:"kernel"`
 	LastUpdateTime int64     `json:"last_update_time"`
 	DiskEncrypted  bool      `json:"disk_encrypted"`
+	FirewallEnabled bool     `json:"firewall_enabled"`
 	Services       []string  `json:"services"`
 	Timestamp      time.Time `json:"timestamp"`
 }
@@ -30,13 +31,14 @@ func Collect() (*Report, error) {
 
 	// Map back to legacy Report until callers migrate
 	return &Report{
-		NodeID:         reportV2.NodeID,
-		Hostname:       hostname,
-		OSRelease:      reportV2.OSName,
-		Kernel:         reportV2.Kernel,
-		LastUpdateTime: reportV2.CollectedAt.Unix(),
-		DiskEncrypted:  reportV2.RootVolumeEncrypted,
-		Services:       reportV2.CriticalServices,
-		Timestamp:      reportV2.CollectedAt,
+		NodeID:          reportV2.NodeID,
+		Hostname:        hostname,
+		OSRelease:       reportV2.OSName,
+		Kernel:          reportV2.Kernel,
+		LastUpdateTime:  reportV2.CollectedAt.Unix(),
+		DiskEncrypted:   reportV2.RootVolumeEncrypted,
+		FirewallEnabled: reportV2.FirewallEnabled,
+		Services:        reportV2.CriticalServices,
+		Timestamp:       reportV2.CollectedAt,
 	}, nil
 }

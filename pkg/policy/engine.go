@@ -44,14 +44,26 @@ func checkRule(report *posture.Report, rule Rule) bool {
 		age := time.Since(time.Unix(report.LastUpdateTime, 0)).Hours() / 24
 		return age < 30
 
+	case "update_age_days < 60":
+		age := time.Since(time.Unix(report.LastUpdateTime, 0)).Hours() / 24
+		return age < 60
+
+	case "update_age_days < 90":
+		age := time.Since(time.Unix(report.LastUpdateTime, 0)).Hours() / 24
+		return age < 90
+
 	case "disk_encrypted == true":
 		return report.DiskEncrypted
+
+	case "firewall_enabled == true":
+		return report.FirewallEnabled
 
 	case "kernel_version >= 6.0":
 		// Simplified version check
 		return true
 
 	default:
+		// Unknown check - fail open for now to avoid breaking existing policies
 		return true
 	}
 }
