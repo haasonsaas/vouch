@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/tls"
@@ -270,7 +269,7 @@ func (s *Server) handleReport(c *gin.Context) {
 	metricReportRequests.Add(1)
 	logger := requestLogger(c, s.logger)
 
-	report, device, err := s.authenticateReport(c)
+	report, rawBytes, device, err := s.authenticateReport(c)
 	if err != nil {
 		metricReportFailures.Add(1)
 		switch {
@@ -291,17 +290,11 @@ func (s *Server) handleReport(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, "failed to process report", s.logger)
 		return
 	}
-	postureRaw, err := json.Marshal(report)
-	if err != nil {
-		logger.Error().Err(err).Msg("Failed to marshal posture")
-		respondError(c, http.StatusInternalServerError, "failed to process report", s.logger)
-		return
-	}
 
 	device.Compliant = eval.Compliant
 	device.LastSeen = time.Now().UTC()
 	device.Violations = string(violations)
-	device.PostureRaw = string(postureRaw)
+	device.PostureRaw = string(rawBytes) // Store raw request bytes, not re-marshaled struct
 
 	if err := s.db.Save(device).Error; err != nil {
 		metricReportFailures.Add(1)
@@ -351,44 +344,50 @@ func (s *Server) rateLimited(bucket string, limit int, window time.Duration, key
 	}
 }
 
-func (s *Server) authenticateReport(c *gin.Context) (posture.Report, *DeviceState, error) {
-	var empty posture.Report
+func (s *Server) authenticateReport(c *gin.Context) (posture.ReportV2, []byte, *DeviceState, error) {
+	var empty posture.ReportV2
 	agentID := c.GetHeader("X-Vouch-Agent-ID")
 	signature := c.GetHeader("X-Vouch-Signature")
 	timestamp := c.GetHeader("X-Vouch-Timestamp")
 	nonce := c.GetHeader("X-Vouch-Nonce")
 
 	if agentID == "" || signature == "" || timestamp == "" || nonce == "" {
-		return empty, nil, errors.New("missing authentication headers")
+		return empty, nil, nil, errors.New("missing authentication headers")
 	}
 
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
-		return empty, nil, err
+		return empty, nil, nil, err
 	}
-	// reset body for downstream readers
-	c.Request.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-	var report posture.Report
-	if err := json.Unmarshal(bodyBytes, &report); err != nil {
-		return empty, nil, err
+	
+	// Try to decode as ReportV2 first
+	var report posture.ReportV2
+	err = json.Unmarshal(bodyBytes, &report)
+	if err != nil {
+		// Fallback to legacy Report and convert
+		var legacyReport posture.Report
+		if err := json.Unmarshal(bodyBytes, &legacyReport); err != nil {
+			return empty, nil, nil, err
+		}
+		report = posture.LegacyToV2(legacyReport)
 	}
 
 	var device DeviceState
 	if err := s.db.Where("agent_id = ?", agentID).First(&device).Error; err != nil {
-		return empty, nil, err
+		return empty, nil, nil, err
 	}
 
 	if report.NodeID == "" || !strings.EqualFold(report.NodeID, device.NodeID) {
-		return empty, nil, errors.New("node mismatch")
+		return empty, nil, nil, errors.New("node mismatch")
 	}
 
 	if len(device.PublicKey) != ed25519.PublicKeySize {
-		return empty, nil, errors.New("missing public key")
+		return empty, nil, nil, errors.New("missing public key")
 	}
 
 	ts, err := time.Parse(time.RFC3339, timestamp)
 	if err != nil {
-		return empty, nil, err
+		return empty, nil, nil, err
 	}
 
 	signed := &auth.SignedRequest{
@@ -399,14 +398,14 @@ func (s *Server) authenticateReport(c *gin.Context) (posture.Report, *DeviceStat
 	}
 
 	if err := auth.VerifySignedRequest(device.PublicKey, signed, 5*time.Minute); err != nil {
-		return empty, nil, err
+		return empty, nil, nil, err
 	}
 
 	if err := s.nonceStore.CheckAndStore(agentID, nonce, ts); err != nil {
-		return empty, nil, err
+		return empty, nil, nil, err
 	}
 
-	return report, &device, nil
+	return report, bodyBytes, &device, nil
 }
 
 func (s *Server) listDevices(c *gin.Context) {

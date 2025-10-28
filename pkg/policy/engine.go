@@ -22,7 +22,7 @@ type Evaluation struct {
 	Violations []string
 }
 
-func Evaluate(report *posture.Report, policy *Policy) *Evaluation {
+func Evaluate(report *posture.ReportV2, policy *Policy) *Evaluation {
 	eval := &Evaluation{
 		Compliant:  true,
 		Violations: []string{},
@@ -41,22 +41,31 @@ func Evaluate(report *posture.Report, policy *Policy) *Evaluation {
 	return eval
 }
 
-func checkRule(report *posture.Report, rule Rule) bool {
+func checkRule(report *posture.ReportV2, rule Rule) bool {
 	switch rule.Check {
 	case "update_age_days < 30":
-		age := time.Since(time.Unix(report.LastUpdateTime, 0)).Hours() / 24
+		if report.LastUpdateTime == nil || *report.LastUpdateTime == 0 {
+			return false
+		}
+		age := time.Since(time.Unix(*report.LastUpdateTime, 0)).Hours() / 24
 		return age < 30
 
 	case "update_age_days < 60":
-		age := time.Since(time.Unix(report.LastUpdateTime, 0)).Hours() / 24
+		if report.LastUpdateTime == nil || *report.LastUpdateTime == 0 {
+			return false
+		}
+		age := time.Since(time.Unix(*report.LastUpdateTime, 0)).Hours() / 24
 		return age < 60
 
 	case "update_age_days < 90":
-		age := time.Since(time.Unix(report.LastUpdateTime, 0)).Hours() / 24
+		if report.LastUpdateTime == nil || *report.LastUpdateTime == 0 {
+			return false
+		}
+		age := time.Since(time.Unix(*report.LastUpdateTime, 0)).Hours() / 24
 		return age < 90
 
 	case "disk_encrypted == true":
-		return report.DiskEncrypted
+		return report.RootVolumeEncrypted
 
 	case "firewall_enabled == true":
 		return report.FirewallEnabled
