@@ -252,6 +252,12 @@ func (c *CollectorV2) probeMacOSUpdates(ctx context.Context, r *ReportV2) {
 	if err == nil && strings.TrimSpace(string(out)) == "1" {
 		r.AutoUpdateEnabled = true
 	}
+
+	// Last update time from InstallHistory.plist modification time
+	if info, err := os.Stat("/Library/Receipts/InstallHistory.plist"); err == nil {
+		ts := info.ModTime().Unix()
+		r.LastUpdateTime = &ts
+	}
 }
 
 func (c *CollectorV2) probeWindowsUpdates(ctx context.Context, r *ReportV2) {
