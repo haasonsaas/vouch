@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,6 +34,8 @@ import (
 
 var (
 	listen              = flag.String("listen", ":8080", "Listen address")
+	tlsCert             = flag.String("tls-cert", "", "Path to TLS certificate (PEM), e.g. from tailscale cert")
+	tlsKey              = flag.String("tls-key", "", "Path to TLS private key (PEM)")
 	policyFile          = flag.String("policy", "policies.yaml", "Policy file path")
 	dbPath              = flag.String("db", "vouch.db", "Database path")
 	tailscaleAPIKey     = flag.String("tailscale-api-key", "", "Tailscale API key (or set TAILSCALE_API_KEY)")
@@ -217,8 +220,49 @@ func main() {
 	r.GET(metricsPath, gin.WrapH(expvar.Handler()))
 
 	log.Info().Str("listen", *listen).Msg("Server listening")
-	if err := r.Run(*listen); err != nil {
-		log.Fatal().Err(err).Msg("Server run failed")
+	
+	// Build HTTP server with optional TLS
+	httpSrv := &http.Server{
+		Addr:    *listen,
+		Handler: r,
+	}
+
+	// HTTPS if both TLS flags provided; otherwise HTTP
+	if *tlsCert != "" || *tlsKey != "" {
+		if *tlsCert == "" || *tlsKey == "" {
+			log.Fatal().Msg("both --tls-cert and --tls-key must be provided to enable TLS")
+		}
+
+		cert, err := tls.LoadX509KeyPair(*tlsCert, *tlsKey)
+		if err != nil {
+			log.Fatal().Err(err).Msg("failed to load TLS certificate/key")
+		}
+
+		httpSrv.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			CurvePreferences: []tls.CurveID{
+				tls.X25519, tls.CurveP256, tls.CurveP384,
+			},
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			},
+			Certificates: []tls.Certificate{cert},
+		}
+
+		log.Info().Str("listen", *listen).Msg("Starting HTTPS server")
+		if err := httpSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("Server run failed")
+		}
+	} else {
+		log.Info().Str("listen", *listen).Msg("Starting HTTP server")
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal().Err(err).Msg("Server run failed")
+		}
 	}
 }
 
