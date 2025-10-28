@@ -674,7 +674,7 @@ func (s *Server) calculateTrustScore(posture *posture.ReportV2, violations []str
 	if posture.RebootPending {
 		score -= 5
 	}
-	if posture.LastUpdateTime != nil && time.Since(*posture.LastUpdateTime) > 30*24*time.Hour {
+	if posture.LastUpdateTime != nil && time.Since(time.Unix(*posture.LastUpdateTime, 0)) > 30*24*time.Hour {
 		score -= 20
 	}
 	if !posture.SecureBootEnabled && posture.OS != "darwin" {
